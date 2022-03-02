@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <netdb.h>
 #include <cstring>
-#include <vector>
+#include <unordered_map>
 #include <fstream>
 
 using namespace std;
@@ -37,21 +37,26 @@ typedef struct packet_t {
 typedef struct conn_t {
   // keeps track of where to send the packet back to 
   struct sockaddr addr;
-  // keeping track of packets
-  short ID;
+  // keeping track of client ID
+  unsigned short ID;
   // initialize current sequence number to 4321
-  int currentSeq = INIT_SEQ;
-  int currentAck; 
+  unsigned int currentSeq = INIT_SEQ;
+  unsigned int currentAck; 
   // need to add necessary congestion variables
-  int cwnd = MIN_CWND;
-  int ssthresh = INIT_SSTHRESH;
+  unsigned int cwnd = MIN_CWND;
+  unsigned int ssthresh = INIT_SSTHRESH;
   // ofstream to write to
   ofstream *fs;
+  // waiting for final ACK from client to completely close
+  bool waitingForAck = false;
 } conn_t;
 
 bool synPacket(packet_t &incomingPacket);
+bool ackPacket(packet_t &incomingPacket);
+bool finPacket(packet_t &incomingPacket);
 void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client);
-void connToHeader(conn_t *pConn, packet_t &packet);
+void finHandshake(packet_t &incomingPacket);
+void connToHeader(conn_t *connection, packet_t &packet);
 void setA(packet_t &packet, bool b);
 void setS(packet_t &packet, bool b);
 void setF(packet_t &packet, bool b);
@@ -60,10 +65,12 @@ bool getS(packet_t &packet);
 bool getF(packet_t &packet);
 unsigned int payloadSize(packet_t &packet);
 void printPacketServer(packet_t &packet, conn_t *connection, bool recv);
+void dropPacketServer(packet_t &packet);
+void appendPayload(packet_t &packet, conn_t *connection);
 
 // global variables
 // vector to keep track of outstanding connections
-vector <conn_t*> connections;
+unordered_map<short, conn_t*> connections;
 // file directory to save the files to
 string file_directory;
 unsigned int currentConn = 1;
@@ -98,7 +105,7 @@ int main(int argc, char *argv[])
   // # of bytes received
   int recvNum;
   // indicates whether it is the start of a connection
-  bool syn;
+  bool syn, fin;
 
   // setting up server socket
   // check valid port number
@@ -141,7 +148,7 @@ int main(int argc, char *argv[])
   while (true) {
     // reset contents of incoming packet to be emtpy
     incomingPacket = {0};
-
+    client = {0};
     // recvNum = size of datagram read in
     cerr << "Waiting\n";
     recvNum = recvfrom(server_fd, &incomingPacket, PACKET_SIZE, 0, &client, &addr_len); 
@@ -149,15 +156,28 @@ int main(int argc, char *argv[])
     
     // function that checks if it's a packet w SYN flag, ACK/FIN = 0
     syn = synPacket(incomingPacket);
-
+    fin = finPacket(incomingPacket);
     // conditional branch where the packet indicates a new connection
     if (syn) {
       // utilize 3 way handshake here
       ThreeWayHandshake(incomingPacket, client);
     }
-    // conditonal branch for a packet with an existing connection
+    else if (fin) {
+      // start closing of a connection
+      finHandshake(incomingPacket);
+    }
+    // conditonal branch for a packet without SYN flag
     else {
-      cerr << "Didn't enter\n";
+      // REVISE LATER
+      // matching connection found
+      if (connections.find(incomingPacket.connectionID) != connections.end()) {
+        appendPayload(incomingPacket, connections[incomingPacket.connectionID]);
+      }
+      // no matching connection for the packet, so discard it
+      else {
+        // discard
+        dropPacketServer(incomingPacket);
+      }
     }
   }
 }
@@ -169,15 +189,30 @@ bool synPacket(packet_t &incomingPacket) {
   return !((t >> 2) & 0x1) && ((t >> 1) & 0x1) && !(t & 0x1);
 }
 
+bool finPacket(packet_t &incomingPacket) {
+  char t = incomingPacket.flags;
+  // want !A !S F
+  return !((t >> 2) & 0x1) && !((t >> 1) & 0x1) && (t & 0x1);
+}
+
+bool ackPacket(packet_t &incomingPacket) {
+  char t = incomingPacket.flags;
+
+  // want A !S !F
+  return ((t >> 2) & 0x1) && !((t >> 1) & 0x1) && !(t & 0x1);
+}
+
 // already know that the current buffer contains a SYN packet
 // create a new connection
-#include <iomanip>
 void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
   cerr << "Entered 3way\n";
   conn_t *newC = new conn_t;
 
+
   // indicates new connection
   if (incomingPacket.connectionID == 0) {
+    // printing out received packet
+    printPacketServer(incomingPacket, newC, true);
     newC->ID = currentConn;
     // now expecting the next byte
     newC->currentAck = incomingPacket.sequence + 1;
@@ -188,7 +223,8 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
   // syn packet for an already existing connection
   else {
     // delete newly allocated connection, since it exists
-    // potentially send an ACK to them
+    // Drop packet since it has a nonzero connection number
+    dropPacketServer(incomingPacket);
     delete newC;
     return;
   }
@@ -201,12 +237,11 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
 
   ofstream *myF = new ofstream(path);
   newC->fs = myF;
-  *myF << incomingPacket.payload;
-  // can only read from the file after closing
-  myF->close();
 
-  // printing out recevied packet
-  printPacketServer(incomingPacket, newC, true);
+  // THIS WAS JUST FOR TESTING, no payload in initial SYN packet
+  // *myF << incomingPacket.payload;
+  // can only read from the file after closing
+  // myF->close();
 
   // can now reuse buffer since all information has been extracted
   // clearing previous information for packet
@@ -223,14 +258,67 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
   // printing out sent packet
   printPacketServer(incomingPacket, newC, false);
 
+  // update next sequence number to be + 1
+  newC->currentSeq++;
+
   // add new connection 
-  connections.push_back(newC);
+  connections[newC->ID] = newC;
 }
+
+// initiate the closing of an existing connection after receiving the FIN packet
+void finHandshake(packet_t &incomingPacket) {
+  // check that the connection exists
+  unsigned short ID = incomingPacket.connectionID;
+  // discard packet since no corresponding connection
+  if (connections.find(ID) == connections.end()) {
+    dropPacketServer(incomingPacket);
+    return;
+  }
+  // need to find the corresponding connection
+  // indicate that it's in the process of being closed
+  else {
+    conn_t *connection = connections[ID];
+
+    // checking that the current sequence matches the last sent ack
+    if (connection->currentAck != incomingPacket.sequence) {
+      // need to resend previous ack so client knows that the server hasn't
+      // received all of the necessary bytes yet
+      return;
+    }
+    
+    // set a variable to the connection / start a timer or something
+    // whatever is necessary to close the connection
+    // indicate that it is waiting for an ACK to close
+    // start a timer to potentially resend FIN/ACK packet after 0.5s if it doesn't get ACK from client
+    connection->waitingForAck = true;
+    // ASSUMING THAT THERE IS NO OUTSTANDING MISSING PACKETS / BYTES
+    // NOTHING IN OUT OF ORDER BUFFER LEFT
+    
+    // assemble response ACK/FIN packet
+    incomingPacket = {0};
+    // don't need to update seqnum for fin|ack
+    // connection->currentSeq = same
+    incomingPacket.sequence = connection->currentSeq;
+    connection->currentAck = (connection->currentAck + 1) % (MAX_ACK + 1);
+    incomingPacket.acknowledgment = connection->currentAck;
+    incomingPacket.connectionID = ID;
+    setA(incomingPacket, true);
+    setS(incomingPacket, false);
+    setF(incomingPacket, true);
+    
+    // send the packet response
+    sendto(server_fd, &incomingPacket, PACKET_SIZE, 0, &connection->addr, addr_len);
+
+    // printing out the packet response
+    printPacketServer(incomingPacket, connection, false);
+  }
+}
+
 // converts a connection struct to corresponding header in packet
-void connToHeader(conn_t *pConn, packet_t &packet) {
-  packet.sequence = pConn->currentSeq;
-  packet.acknowledgment = pConn->currentAck;
-  packet.connectionID = pConn->ID;
+void connToHeader(conn_t *connection, packet_t &packet) {
+  packet.sequence = connection->currentSeq;
+  packet.acknowledgment = connection->currentAck;
+  packet.connectionID = connection->ID;
 }
 
 void setA(packet_t &packet, bool b) {
@@ -305,4 +393,74 @@ void printPacketServer(packet_t &packet, conn_t *connection, bool recv) {
 
   // end of print statement, append newline
   cout << endl;
+}
+
+// print necessary string for dropped packet
+void dropPacketServer(packet_t &packet) {
+  string msg = "DROP ";
+  msg += packet.sequence;
+  msg += " ";
+  msg += packet.acknowledgment;
+  msg += " ";
+  msg += packet.connectionID;
+  if (getA(packet)) {
+    msg += " ACK";
+  }
+  if (getS(packet)) {
+    msg += " SYN";
+  }
+  if (getF(packet)) {
+    msg += " FIN";
+  }
+  msg += '\n';
+  cout << msg;
+}
+
+void appendPayload(packet_t &packet, conn_t *connection) {
+  // print out the received packet
+  printPacketServer(packet, connection, true);
+
+  // assuming in order arrival, no buffering required yet
+  int len = payloadSize(packet);
+  // incoming sequence number matches previously sent ACK
+  if (packet.sequence == connection->currentAck) {
+    // add a check to see if it's the FIN-ACK packet to close a connection
+    // condition where it's an ACK packet and the connection has been waiting for one
+    if (ackPacket(packet) && connection->waitingForAck) {
+      // need to close file pointer
+      connection->fs->close();
+      cerr << "Closed connection " << connection->ID << endl;
+      // remove from the connections hash table
+      connections.erase(connection->ID);
+      // free allocated resources
+      delete connection;
+      return;
+    }
+    // append payload to existing file
+    *connection->fs << packet.payload;
+    // (*connection->fs).close(); // close to just see if it worked
+    // update current Seq & Ack Num for the connection
+    // seqNum only increments on SYN and FIN, not for ACK
+    // connection->currentSeq - same
+    connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
+
+    // create packet to send back acknowledgement
+    packet = {0};
+    packet.sequence = connection->currentSeq;
+    packet.acknowledgment = connection->currentAck;
+    packet.connectionID = connection->ID;
+    setA(packet, true);
+    setS(packet, false);
+    setF(packet, false);
+
+    // send the packet to the respective client
+    sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
+
+    // need to print out packet sent
+    printPacketServer(packet, connection, false);
+  }
+  // out of order branch requires buffering
+  else {
+    
+  }
 }

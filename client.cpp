@@ -29,13 +29,13 @@ typedef struct conn_t {
   // keeps track of where to send the packet back to 
   struct sockaddr addr;
   // keeping track of packets
-  short ID;
+  unsigned short ID;
   // initialize current sequence number to 4321
-  int currentSeq;
-  int currentAck; 
+  unsigned int currentSeq = 4321;
+  unsigned int currentAck; 
   // need to add necessary congestion variables
-  int cwnd;
-  int ssthresh;
+  unsigned int cwnd;
+  unsigned int ssthresh;
   // ofstream to write to
   ofstream *fs;
 } conn_t;
@@ -90,9 +90,6 @@ int main(int argc, char *argv[])
   setS(packet, true);
   setF(packet, false);
 
-  strcpy(packet.payload, "Hello World\n");
-  cerr << "Payload: " << packet.payload;
-
   // create a make shift connection
   conn_t client_conn;
   client_conn.ID = 0;
@@ -109,7 +106,59 @@ int main(int argc, char *argv[])
 
   // print out packet received
   client_conn.ID = packet.connectionID;
+  client_conn.currentAck = packet.sequence + 1;
+  client_conn.currentSeq = packet.acknowledgment;
   printPacketServer(packet, &client_conn, true);
+
+  // manually hardcoding response from the client to server
+  packet = {0};
+  packet.sequence = client_conn.currentSeq;
+  packet.acknowledgment = client_conn.currentAck;
+  packet.connectionID = client_conn.ID;
+  setA(packet, true);
+  setS(packet, false);
+  setF(packet, false);
+  strcpy(packet.payload, "Hello World\n");
+  cerr << "Payload: " << packet.payload;
+  printPacketServer(packet, &client_conn, false);
+  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
+  client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
+  
+  // receive response ack from server
+  packet = {0};
+  recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
+  printPacketServer(packet, &client_conn, true);
+
+  // client_conn.currentAck = packet.sequence + 1;
+
+  // sending FIN packet
+  packet = {0};
+  packet.sequence = client_conn.currentSeq;
+  packet.acknowledgment = 0; // ACK = 0 to terminate connection
+  packet.connectionID = client_conn.ID;
+  setA(packet, false);
+  setS(packet, false);
+  setF(packet, true);
+  printPacketServer(packet, &client_conn, false);
+  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
+  client_conn.currentSeq = client_conn.currentSeq + 1;
+
+  // receiving FIN|ACK packet from server
+  packet = {0};
+  recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
+  printPacketServer(packet, &client_conn, true);
+
+  // sending final ACK to indicate it has received SYN|ACK and to close connection completely
+  packet = {0};
+  packet.sequence = client_conn.currentSeq;
+  packet.acknowledgment = client_conn.currentAck + 1;
+  packet.connectionID = client_conn.ID;
+  setA(packet, true);
+  setS(packet, false);
+  setF(packet, false);
+
+  printPacketServer(packet, &client_conn, false);
+  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
 }
 
 void setA(packet_t &packet, bool b) {
