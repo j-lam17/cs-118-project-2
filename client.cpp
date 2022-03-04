@@ -12,7 +12,10 @@
 #include <cstring>
 #include <vector>
 #include <fstream>
+#include <chrono>
 using namespace std;
+using namespace std::this_thread;
+using namespace std::chrono;
 
 #define PACKET_SIZE 524
 
@@ -100,6 +103,8 @@ int main(int argc, char *argv[])
 
   // sending packet
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
+  // inputted wait to test connection close
+  // sleep_for(seconds(15));
   packet = {0};
   int n = recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
   cerr << "Received: " << n << endl;
@@ -147,6 +152,9 @@ int main(int argc, char *argv[])
   packet = {0};
   recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
   printPacketServer(packet, &client_conn, true);
+
+  // inputted wait to test fin ACK
+  // sleep_for(seconds(7));
 
   // sending final ACK to indicate it has received SYN|ACK and to close connection completely
   packet = {0};

@@ -12,10 +12,12 @@
 #include <cstring>
 #include <unordered_map>
 #include <fstream>
+#include <chrono>
 
 using namespace std;
+using namespace std::this_thread;
+using namespace std::chrono;
 
-#define MAX_SIZE 524
 #define MAX_ACK 102400
 #define MIN_CWND 512
 #define MAX_CWND 51200
@@ -23,6 +25,8 @@ using namespace std;
 #define INIT_SSTHRESH 10000
 #define INIT_SEQ 4321
 #define PACKET_SIZE 524
+#define CLOCKID CLOCK_MONOTONIC
+#define SIG SIGRTMIN
 
 // user defined structs
 typedef struct packet_t {
@@ -49,6 +53,12 @@ typedef struct conn_t {
   ofstream *fs;
   // waiting for final ACK from client to completely close
   bool waitingForAck = false;
+  // indicate that you have received data and to deactivate corresponding timer
+  bool data = false;
+  // timer variables, only one timer at a time
+  timer_t *ptrTimerid;
+  struct sigevent *ptrSev;
+  struct itimerspec *ptrIts;
 } conn_t;
 
 bool synPacket(packet_t &incomingPacket);
@@ -67,6 +77,9 @@ unsigned int payloadSize(packet_t &packet);
 void printPacketServer(packet_t &packet, conn_t *connection, bool recv);
 void dropPacketServer(packet_t &packet);
 void appendPayload(packet_t &packet, conn_t *connection);
+// function for closing a connection after 10s without receiving data
+static void initialDataHandler(union sigval val);
+static void finalAckHandler(union sigval val);
 
 // global variables
 // vector to keep track of outstanding connections
@@ -208,7 +221,6 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
   cerr << "Entered 3way\n";
   conn_t *newC = new conn_t;
 
-
   // indicates new connection
   if (incomingPacket.connectionID == 0) {
     // printing out received packet
@@ -228,6 +240,30 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
     delete newC;
     return;
   }
+  
+  // Creating client's timer for 10s to close if no data is received
+  newC->ptrTimerid = new timer_t;
+  newC->ptrSev = new struct sigevent;
+  newC->ptrIts = new struct itimerspec;
+
+  // Create the timer
+  union sigval arg;
+  arg.sival_int = newC->ID;
+
+  // initializing what to do when the signal occurs
+  newC->ptrSev->sigev_notify = SIGEV_THREAD;
+  newC->ptrSev->sigev_notify_function = initialDataHandler;
+  newC->ptrSev->sigev_notify_attributes=NULL;
+  newC->ptrSev->sigev_value = arg;
+  timer_create(CLOCKID, newC->ptrSev, newC->ptrTimerid);
+      
+  newC->ptrIts->it_value.tv_sec = 10;
+  newC->ptrIts->it_value.tv_nsec = 0;
+  newC->ptrIts->it_interval.tv_sec = 0;
+  newC->ptrIts->it_interval.tv_nsec = 0;
+
+  // arming the timer
+  timer_settime(*newC->ptrTimerid, 0, newC->ptrIts, NULL);
 
   // storing payload from client
   cerr << "Creating file\n";
@@ -237,11 +273,6 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
 
   ofstream *myF = new ofstream(path);
   newC->fs = myF;
-
-  // THIS WAS JUST FOR TESTING, no payload in initial SYN packet
-  // *myF << incomingPacket.payload;
-  // can only read from the file after closing
-  // myF->close();
 
   // can now reuse buffer since all information has been extracted
   // clearing previous information for packet
@@ -286,10 +317,7 @@ void finHandshake(packet_t &incomingPacket) {
       return;
     }
     
-    // set a variable to the connection / start a timer or something
-    // whatever is necessary to close the connection
     // indicate that it is waiting for an ACK to close
-    // start a timer to potentially resend FIN/ACK packet after 0.5s if it doesn't get ACK from client
     connection->waitingForAck = true;
     // ASSUMING THAT THERE IS NO OUTSTANDING MISSING PACKETS / BYTES
     // NOTHING IN OUT OF ORDER BUFFER LEFT
@@ -297,17 +325,27 @@ void finHandshake(packet_t &incomingPacket) {
     // assemble response ACK/FIN packet
     incomingPacket = {0};
     // don't need to update seqnum for fin|ack
-    // connection->currentSeq = same
-    incomingPacket.sequence = connection->currentSeq;
     connection->currentAck = (connection->currentAck + 1) % (MAX_ACK + 1);
-    incomingPacket.acknowledgment = connection->currentAck;
-    incomingPacket.connectionID = ID;
+    connToHeader(connection, incomingPacket);
     setA(incomingPacket, true);
     setS(incomingPacket, false);
     setF(incomingPacket, true);
     
     // send the packet response
     sendto(server_fd, &incomingPacket, PACKET_SIZE, 0, &connection->addr, addr_len);
+    
+    // Setting necessary timer to wait for final ACK from client
+    // updating handler function
+    connection->ptrSev->sigev_notify_function = finalAckHandler;
+    // create a new timer object
+    timer_create(CLOCKID, connection->ptrSev, connection->ptrTimerid);
+    // arm the timer
+    connection->ptrIts->it_value.tv_sec = 2;
+    connection->ptrIts->it_value.tv_nsec = 0;
+    connection->ptrIts->it_interval.tv_sec = 2;
+    connection->ptrIts->it_interval.tv_nsec = 0;
+
+    timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
 
     // printing out the packet response
     printPacketServer(incomingPacket, connection, false);
@@ -368,41 +406,49 @@ unsigned int payloadSize(packet_t &packet) {
 // printing out packets
 // need to double check formatting
 void printPacketServer(packet_t &packet, conn_t *connection, bool recv) {
+  string msg = "";
   if (recv) {
-    cout << "RECV ";
+    msg += "RECV ";
   }
   else {
-    cout << "SEND ";
+    msg += "SEND ";
   }
-  cout << packet.sequence << " " << packet.acknowledgment
-  << " " << connection->ID << " " << connection->cwnd;
+  msg += to_string(packet.sequence);
+  msg += " ";
+  msg += to_string(packet.acknowledgment);
+  msg += " ";
+  msg += to_string(connection->ID);
+  msg += " ";
+  msg += to_string(connection->cwnd);
   
   if (getA(packet)) {
-    cout << " ACK";
+    msg += " ACK";
   }
 
   if (getS(packet)) {
-    cout << " SYN";
+    msg += " SYN";
   }
 
   if (getF(packet)) {
-    cout << " FIN";
+    msg += " FIN";
   }
+  
+  msg += '\n';
 
   // add duplicate check at some point as well
 
   // end of print statement, append newline
-  cout << endl;
+  cout << msg;
 }
 
 // print necessary string for dropped packet
 void dropPacketServer(packet_t &packet) {
   string msg = "DROP ";
-  msg += packet.sequence;
+  msg += to_string(packet.sequence);
   msg += " ";
-  msg += packet.acknowledgment;
+  msg += to_string(packet.acknowledgment);
   msg += " ";
-  msg += packet.connectionID;
+  msg += to_string(packet.connectionID);
   if (getA(packet)) {
     msg += " ACK";
   }
@@ -432,23 +478,39 @@ void appendPayload(packet_t &packet, conn_t *connection) {
       cerr << "Closed connection " << connection->ID << endl;
       // remove from the connections hash table
       connections.erase(connection->ID);
+
       // free allocated resources
+      // free ofstream
+      delete connection->fs;
+      // free timer
+      timer_delete(*connection->ptrTimerid);
+      delete connection->ptrTimerid;
+      delete connection->ptrSev;
+      delete connection->ptrIts;
+      // free connection
       delete connection;
       return;
     }
+    // connection receving it's first packet with payload
+    if (!connection->data) {
+      // change variable once so it doesn't check anymore
+      connection->data = true;
+      // disarm the timer & delete it
+      *connection->ptrIts = {{0,0}, {0,0}};
+      timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
+      // another timer will be created for the finalAck
+      timer_delete(*connection->ptrTimerid);
+    }
     // append payload to existing file
     *connection->fs << packet.payload;
-    // (*connection->fs).close(); // close to just see if it worked
-    // update current Seq & Ack Num for the connection
+    // update current Ack Num for the connection
     // seqNum only increments on SYN and FIN, not for ACK
-    // connection->currentSeq - same
+    // connection->currentSeq = same
     connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
 
     // create packet to send back acknowledgement
     packet = {0};
-    packet.sequence = connection->currentSeq;
-    packet.acknowledgment = connection->currentAck;
-    packet.connectionID = connection->ID;
+    connToHeader(connection, packet);
     setA(packet, true);
     setS(packet, false);
     setF(packet, false);
@@ -463,4 +525,42 @@ void appendPayload(packet_t &packet, conn_t *connection) {
   else {
     
   }
+}
+
+static void
+initialDataHandler(union sigval val) {
+  cerr << "In data handler\n";
+  // find the existing connection
+  conn_t *connection = connections[val.sival_int];
+  // write to the file stream 
+  *connection->fs << "ERROR: connection " << val.sival_int << " closed due to no data received\n";
+  // close the file stream
+  connection->fs->close();
+  // remove the connection from the unordered_map
+  connections.erase(connection->ID);
+  // free ofstream
+  delete connection->fs;
+  // destroy timer
+  timer_delete(*connection->ptrTimerid);
+  // free objects
+  delete connection->ptrTimerid;
+  delete connection->ptrSev;
+  delete connection->ptrIts;
+  // free memory
+  delete connection;
+}
+
+static void
+finalAckHandler(union sigval val) {
+  cerr << "In ack handler\n";
+  // find the existing connection
+  conn_t *connection = connections[val.sival_int];
+  // need to retransmit the previous fin packet
+  packet_t packet;
+  connToHeader(connection, packet);
+  setA(packet, true);
+  setS(packet, false);
+  setF(packet, true);
+  // print out the packet
+  printPacketServer(packet, connection, false);
 }
