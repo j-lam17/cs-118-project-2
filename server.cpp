@@ -54,7 +54,8 @@ typedef struct conn_t {
   // waiting for final ACK from client to completely close
   bool waitingForAck = false;
   // indicate that you have received data and to deactivate corresponding timer
-  bool data = false;
+  // 10s window always active for life of the connection, not just starting connection
+  // bool data = false;
   // timer variables, only one timer at a time
   timer_t *ptrTimerid;
   struct sigevent *ptrSev;
@@ -78,7 +79,7 @@ void printPacketServer(packet_t &packet, conn_t *connection, bool recv);
 void dropPacketServer(packet_t &packet);
 void appendPayload(packet_t &packet, conn_t *connection);
 // function for closing a connection after 10s without receiving data
-static void initialDataHandler(union sigval val);
+static void activeDataHandler(union sigval val);
 static void finalAckHandler(union sigval val);
 
 // global variables
@@ -252,7 +253,7 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
 
   // initializing what to do when the signal occurs
   newC->ptrSev->sigev_notify = SIGEV_THREAD;
-  newC->ptrSev->sigev_notify_function = initialDataHandler;
+  newC->ptrSev->sigev_notify_function = activeDataHandler;
   newC->ptrSev->sigev_notify_attributes=NULL;
   newC->ptrSev->sigev_value = arg;
   timer_create(CLOCKID, newC->ptrSev, newC->ptrTimerid);
@@ -335,6 +336,8 @@ void finHandshake(packet_t &incomingPacket) {
     sendto(server_fd, &incomingPacket, PACKET_SIZE, 0, &connection->addr, addr_len);
     
     // Setting necessary timer to wait for final ACK from client
+    // need to delete previous timer for 10s data
+    timer_delete(*connection->ptrTimerid);
     // updating handler function
     connection->ptrSev->sigev_notify_function = finalAckHandler;
     // create a new timer object
@@ -418,9 +421,10 @@ void printPacketServer(packet_t &packet, conn_t *connection, bool recv) {
   msg += to_string(packet.acknowledgment);
   msg += " ";
   msg += to_string(connection->ID);
+  /* Not needed for server side
   msg += " ";
   msg += to_string(connection->cwnd);
-  
+  */
   if (getA(packet)) {
     msg += " ACK";
   }
@@ -491,16 +495,10 @@ void appendPayload(packet_t &packet, conn_t *connection) {
       delete connection;
       return;
     }
-    // connection receving it's first packet with payload
-    if (!connection->data) {
-      // change variable once so it doesn't check anymore
-      connection->data = true;
-      // disarm the timer & delete it
-      *connection->ptrIts = {{0,0}, {0,0}};
-      timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
-      // another timer will be created for the finalAck
-      timer_delete(*connection->ptrTimerid);
-    }
+    // need to update this to reset timer whenever a packet is received
+    // reset the timer delay to 10s
+    timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
+    
     // append payload to existing file
     *connection->fs << packet.payload;
     // update current Ack Num for the connection
@@ -528,12 +526,12 @@ void appendPayload(packet_t &packet, conn_t *connection) {
 }
 
 static void
-initialDataHandler(union sigval val) {
+activeDataHandler(union sigval val) {
   cerr << "In data handler\n";
   // find the existing connection
   conn_t *connection = connections[val.sival_int];
-  // write to the file stream 
-  *connection->fs << "ERROR: connection " << val.sival_int << " closed due to no data received\n";
+  // write single ERROR string to the file stream 
+  *connection->fs << "ERROR";
   // close the file stream
   connection->fs->close();
   // remove the connection from the unordered_map

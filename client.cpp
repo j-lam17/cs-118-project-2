@@ -135,7 +135,8 @@ int main(int argc, char *argv[])
   printPacketServer(packet, &client_conn, true);
 
   // client_conn.currentAck = packet.sequence + 1;
-
+  // inputted wait to test connection close
+  sleep_for(seconds(15));
   // sending FIN packet
   packet = {0};
   packet.sequence = client_conn.currentSeq;
