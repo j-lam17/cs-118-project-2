@@ -66,7 +66,7 @@ typedef struct payload_t {
   unsigned int sequence;
   unsigned int length;
   char payload[512];
-}
+} payload_t; 
 
 bool synPacket(packet_t &incomingPacket);
 bool ackPacket(packet_t &incomingPacket);
@@ -101,7 +101,10 @@ socklen_t addr_len = sizeof(struct sockaddr);
 unsigned int rcvbuf = 0;
 unsigned int ACK = 12345;
 unsigned int last_byte_read = 12345;
-unordered_map<unsigned int, payload_t*> 
+unordered_map<unsigned int, unsigned int> bytes_recieved; //key = seq#, val = packet length
+
+unordered_map<unsigned int, payload_t*> payloads; //key = seq#, val = payload struct
+
 
 // client initiates with SYN, so need to wait to receive a SYN packet
 // before sending back SYN/ACK (no payload)
@@ -112,6 +115,7 @@ unordered_map<unsigned int, payload_t*>
 // single client
 // 2) window tracking function
 // keeping track of acks, sequences, cwnd, all of the stuff in TCP
+
 
 int main(int argc, char *argv[])
 {
@@ -486,10 +490,10 @@ void appendPayload(packet_t &packet, conn_t *connection) {
 
   //handling overflowing rwnd:
   if ((packet.sequence + len) < last_byte_read){
-    last_byte_read = packet.sequence + len
+    last_byte_read = packet.sequence + len;
   }
 
-  if ((last_byte_read - ACK) > rwnd) {
+  if ((last_byte_read - ACK) > RWND) {
     dropPacketServer(packet);
     return;
   }
@@ -535,6 +539,10 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     // connection->currentSeq = same
     connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
     
+
+
+
+
     // create packet to send back acknowledgement
     packet = {0};
     connToHeader(connection, packet);
@@ -550,6 +558,32 @@ void appendPayload(packet_t &packet, conn_t *connection) {
   }
   //2. Out of Order Delivery:
   else {
+
+    cerr << "OOO delivery! " << packet.sequence << endl;
+
+    payload_t *newPayload = new payload_t;
+    newPayload -> sequence = packet.sequence;
+    newPayload -> length = len;
+    strcpy(newPayload->payload, packet.payload);
+
+    //add OOO bytes interval to dictionary
+    bytes_recieved[newPayload -> sequence] = newPayload -> length;
+
+    //add payload to payload dictionary
+    payloads[newPayload -> sequence] = newPayload;
+
+    //send back OOO ACK
+    packet = {0};
+    connToHeader(connection, packet);
+    setA(packet, true);
+    setS(packet, false);
+    setF(packet, false);
+
+    // send the packet to the respective client
+    sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
+
+    // need to print out packet sent
+    printPacketServer(packet, connection, false);
     
   }
 }
