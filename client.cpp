@@ -214,8 +214,8 @@ void printPacketServer(packet_t &packet, conn_t *connection, bool recv) {
   else {
     cout << "SEND ";
   }
-  cout << packet.sequence << " " << packet.acknowledgment
-  << " " << connection->ID << " " << connection->cwnd;
+  cout << "seq#: " << packet.sequence << " ack #: " << packet.acknowledgment
+  << " conn_id: " << connection->ID << " cwnd: " << connection->cwnd;
   
   if (getA(packet)) {
     cout << " ACK";

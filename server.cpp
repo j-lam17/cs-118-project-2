@@ -51,6 +51,12 @@ typedef struct conn_t {
   bool waitingForAck = false;
 } conn_t;
 
+typedef struct payload_t {
+  unsigned int sequence;
+  unsigned int length;
+  char payload[512];
+}
+
 bool synPacket(packet_t &incomingPacket);
 bool ackPacket(packet_t &incomingPacket);
 bool finPacket(packet_t &incomingPacket);
@@ -76,6 +82,12 @@ string file_directory;
 unsigned int currentConn = 1;
 int server_fd;
 socklen_t addr_len = sizeof(struct sockaddr);
+
+//OOO delivery global variables
+unsigned int rcvbuf = 0;
+unsigned int ACK = 12345;
+unsigned int last_byte_read = 12345;
+unordered_map<unsigned int, payload_t*> 
 
 // client initiates with SYN, so need to wait to receive a SYN packet
 // before sending back SYN/ACK (no payload)
@@ -374,8 +386,8 @@ void printPacketServer(packet_t &packet, conn_t *connection, bool recv) {
   else {
     cout << "SEND ";
   }
-  cout << packet.sequence << " " << packet.acknowledgment
-  << " " << connection->ID << " " << connection->cwnd;
+  cout << "seq#: " << packet.sequence << " ack #: " << packet.acknowledgment
+  << " conn_id: " << connection->ID << " cwnd: " << connection->cwnd;
   
   if (getA(packet)) {
     cout << " ACK";
@@ -420,12 +432,29 @@ void appendPayload(packet_t &packet, conn_t *connection) {
   // print out the received packet
   printPacketServer(packet, connection, true);
 
-  // assuming in order arrival, no buffering required yet
   int len = payloadSize(packet);
-  // incoming sequence number matches previously sent ACK
+
+  //handling overflowing rwnd:
+  if ((packet.sequence + len) < last_byte_read){
+    last_byte_read = packet.sequence + len
+  }
+
+  if ((last_byte_read - ACK) > rwnd) {
+    dropPacketServer(packet);
+    return;
+  }
+
+  //check if wrapping occurs:
+  if (last_byte_read > MAX_ACK){
+    last_byte_read = last_byte_read % MAX_ACK;
+  }
+
+  // 1. In Order Delivery:
   if (packet.sequence == connection->currentAck) {
     // add a check to see if it's the FIN-ACK packet to close a connection
     // condition where it's an ACK packet and the connection has been waiting for one
+
+    //enter when client has sent back final FIN-ACK statement
     if (ackPacket(packet) && connection->waitingForAck) {
       // need to close file pointer
       connection->fs->close();
@@ -443,7 +472,7 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     // seqNum only increments on SYN and FIN, not for ACK
     // connection->currentSeq - same
     connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
-
+    
     // create packet to send back acknowledgement
     packet = {0};
     packet.sequence = connection->currentSeq;
@@ -459,7 +488,7 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     // need to print out packet sent
     printPacketServer(packet, connection, false);
   }
-  // out of order branch requires buffering
+  //2. Out of Order Delivery:
   else {
     
   }
