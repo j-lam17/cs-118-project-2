@@ -484,7 +484,7 @@ void dropPacketServer(packet_t &packet) {
 
 void appendPayload(packet_t &packet, conn_t *connection) {
   // print out the received packet
-  printPacketServer(packet, connection, true);
+  // printPacketServer(packet, connection, true);
 
   int len = payloadSize(packet);
 
@@ -534,15 +534,32 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     
     // append payload to existing file
     *connection->fs << packet.payload;
-    // update current Ack Num for the connection
-    // seqNum only increments on SYN and FIN, not for ACK
-    // connection->currentSeq = same
+
+    // update current ACK, seqNum only increments on SYN and FIN, not for ACK
     connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
     
+    //check if in order packet fills a gap
+    while (payloads.find(connection->currentAck) != payloads.end()){ //while there's an OOO packet that is now ready
+      int packet_sequence = connection->currentAck;
+      int packet_length = bytes_recieved[packet_sequence];
 
+      connection->currentAck = (connection->currentAck + packet_length) % (MAX_ACK + 1);
 
+      rcvbuf -= packet_length;
 
+      char payload_to_fill[512];
 
+      strcpy(payload_to_fill, payloads[packet_sequence]->payload);
+
+      *connection->fs << payload_to_fill;
+
+      //remove entry from bytes_to_read:
+      bytes_recieved.erase(packet_sequence);
+
+      // remote entry from payloads:
+      payloads.erase(packet_sequence);
+
+    }
     // create packet to send back acknowledgement
     packet = {0};
     connToHeader(connection, packet);
@@ -572,7 +589,7 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     //add payload to payload dictionary
     payloads[newPayload -> sequence] = newPayload;
 
-    //send back OOO ACK
+    //send back duplicate ACK
     packet = {0};
     connToHeader(connection, packet);
     setA(packet, true);
