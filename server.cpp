@@ -87,6 +87,9 @@ void appendPayload(packet_t &packet, conn_t *connection);
 // function for closing a connection after 10s without receiving data
 static void activeDataHandler(union sigval val);
 static void finalAckHandler(union sigval val);
+static void sigHandler(int signum);
+void recvPacket(packet_t &packet);
+void sendPacket(packet_t &packet);
 
 // global variables
 // vector to keep track of outstanding connections
@@ -124,6 +127,13 @@ int main(int argc, char *argv[])
     cerr << "ERROR: Usage: " << argv[0] <<  " <PORT> <FILE-DIR>" << endl;
     exit(1);
   }
+
+
+
+  // intializing signal handlers
+  signal(SIGQUIT, sigHandler);
+  signal(SIGTERM, sigHandler);
+
 
   int port = atoi(argv[1]);
   file_directory = argv[2];
@@ -181,8 +191,11 @@ int main(int argc, char *argv[])
     client = {0};
     // recvNum = size of datagram read in
     cerr << "Waiting\n";
-    recvNum = recvfrom(server_fd, &incomingPacket, PACKET_SIZE, 0, &client, &addr_len); 
-    cerr << "Received: " << recvNum << endl;
+    int recvNum = recvfrom(server_fd, &incomingPacket, PACKET_SIZE, 0, &client, &addr_len); 
+    // cerr << "Received: " << recvNum << endl;
+
+    // process packet
+    recvPacket(incomingPacket);
     
     // function that checks if it's a packet w SYN flag, ACK/FIN = 0
     syn = synPacket(incomingPacket);
@@ -306,6 +319,12 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client) {
   // printing out sent packet
   printPacketServer(incomingPacket, newC, false);
 
+  // processing to send
+  sendPacket(incomingPacket);
+  
+  // change response length to only be 12
+  sendto(server_fd, &incomingPacket, 12, 0, &newC->addr, addr_len);
+
   // update next sequence number to be + 1
   newC->currentSeq++;
 
@@ -347,6 +366,12 @@ void finHandshake(packet_t &incomingPacket) {
     setA(incomingPacket, true);
     setS(incomingPacket, false);
     setF(incomingPacket, true);
+
+    // printing out the packet response
+    printPacketServer(incomingPacket, connection, false);
+
+    // processing to send
+    sendPacket(incomingPacket);
     
     // send the packet response
     sendto(server_fd, &incomingPacket, PACKET_SIZE, 0, &connection->addr, addr_len);
@@ -489,13 +514,35 @@ void appendPayload(packet_t &packet, conn_t *connection) {
   int len = payloadSize(packet);
 
   //handling overflowing rwnd:
-  if ((packet.sequence + len) < last_byte_read){
-    last_byte_read = packet.sequence + len;
-  }
+  unsigned int last_byte = packet.sequence + len;
 
-  if ((last_byte_read - ACK) > RWND) {
+  if ((last_byte - ACK) > RWND) {
+    cerr << "OVERFLOW" << endl;
     dropPacketServer(packet);
+
+    // create packet to send back acknowledgement
+    //since dropped packet, nothing happens
+    packet = {0};
+    connToHeader(connection, packet);
+    setA(packet, true);
+    setS(packet, false);
+    setF(packet, false);
+
+    // need to print out packet sent
+    printPacketServer(packet, connection, false);
+
+    // processing to send
+    sendPacket(packet);
+
+    // send the packet to the respective client
+    sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
+
+    
     return;
+  }
+  else if (last_byte > last_byte_read){//not overflow
+    last_byte_read = last_byte;
+
   }
 
   //check if wrapping occurs:
@@ -567,11 +614,14 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     setS(packet, false);
     setF(packet, false);
 
-    // send the packet to the respective client
-    sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
-
     // need to print out packet sent
     printPacketServer(packet, connection, false);
+
+    // processing to send
+    sendPacket(packet);
+
+    // send the packet to the respective client
+    sendto(server_fd, &packet, 12, 0, &connection->addr, addr_len);
   }
   //2. Out of Order Delivery:
   else {
@@ -589,18 +639,21 @@ void appendPayload(packet_t &packet, conn_t *connection) {
     //add payload to payload dictionary
     payloads[newPayload -> sequence] = newPayload;
 
-    //send back duplicate ACK
+    //send back duplicate ack
     packet = {0};
     connToHeader(connection, packet);
     setA(packet, true);
     setS(packet, false);
     setF(packet, false);
 
-    // send the packet to the respective client
-    sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
-
     // need to print out packet sent
     printPacketServer(packet, connection, false);
+
+    // processing to send
+    sendPacket(packet);
+
+    // send the packet to the respective client
+    sendto(server_fd, &packet, 12, 0, &connection->addr, addr_len);
     
   }
 }
@@ -641,4 +694,20 @@ finalAckHandler(union sigval val) {
   setF(packet, true);
   // print out the packet
   printPacketServer(packet, connection, false);
+}
+
+static void sigHandler(int signum) {
+  cerr << "Caught signal\n";
+  exit(0);
+}
+
+void recvPacket(packet_t &packet) {
+  packet.sequence = ntohl(packet.sequence);
+  packet.acknowledgment = ntohl(packet.acknowledgment);
+  packet.connectionID = ntohs(packet.connectionID);
+}
+void sendPacket(packet_t &packet) {
+  packet.sequence = htonl(packet.sequence);
+  packet.acknowledgment = htonl(packet.acknowledgment);
+  packet.connectionID = htons(packet.connectionID);
 }
