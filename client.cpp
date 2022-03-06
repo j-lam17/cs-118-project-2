@@ -1,57 +1,63 @@
-#include <string>
-#include <thread>
-#include <iostream>
+#include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/types.h>
-#include <time.h>
+#include <fcntl.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+#include <unistd.h>
 #include <signal.h>
+#include <time.h>
 #include <errno.h>
 #include <netdb.h>
 #include <cstring>
 #include <vector>
 #include <fstream>
-#include <chrono>
+#include <iostream>
+#include <bitset>
+
 using namespace std;
-using namespace std::this_thread;
-using namespace std::chrono;
 
 #define PACKET_SIZE 524
+#define ACK 0x04     // 00000100
+#define SYN 0x02     // 00000010
+#define FIN 0x01     // 00000001
+#define SYN_ACK 0x06 // 00000110
+#define FIN_ACK 0x05 // 00000101
 
-typedef struct packet_t {
-  unsigned int sequence;
-  unsigned int acknowledgment;
-  unsigned short connectionID;
-  char empty;
-  char flags;
-  char payload[512]; 
+typedef struct packet_t
+{
+  uint32_t sequence;
+  uint32_t acknowledgment;
+  uint16_t connectionID;
+  uint16_t flags;
+  uint8_t payload[512];
 } packet_t;
 
-typedef struct conn_t {
-  // keeps track of where to send the packet back to 
+typedef struct conn_t
+{
+  // keeps track of where to send the packet back to
   struct sockaddr addr;
   // keeping track of packets
-  unsigned short ID;
+  uint16_t ID;
   // initialize current sequence number to 4321
-  unsigned int currentSeq = 4321;
-  unsigned int currentAck; 
+  uint32_t currentSeq;
+  uint32_t currentAck;
   // need to add necessary congestion variables
-  unsigned int cwnd;
-  unsigned int ssthresh;
+  uint32_t cwnd;
+  uint32_t ssthresh;
   // ofstream to write to
   ofstream *fs;
 } conn_t;
 
-
-void setA(packet_t &packet, bool b);
-void setS(packet_t &packet, bool b);
-void setF(packet_t &packet, bool b);
 bool getA(packet_t &packet);
 bool getS(packet_t &packet);
 bool getF(packet_t &packet);
 unsigned int payloadSize(packet_t &packet);
-void printPacketServer(packet_t &packet, conn_t *connection, bool recv);
+void printPacket(packet_t &packet, conn_t *connection, bool recv);
 
 int main(int argc, char *argv[])
 {
@@ -67,6 +73,12 @@ int main(int argc, char *argv[])
   memset(&hints, 0, sizeof(hints));
   hints.ai_socktype = SOCK_DGRAM; // UDP socket
   hints.ai_family = AF_INET;      // IPv4
+
+  // Initialize connection values
+  conn_t client_conn;
+  client_conn.ID = 0;
+  client_conn.ssthresh = 1000;
+  client_conn.cwnd = 512;
 
   // Get server address info using hints
   // - argv[1]: HOSTNAME-OR-IP
@@ -85,269 +97,166 @@ int main(int argc, char *argv[])
   // - int socket(int domain, int type, int protocol)
   int serverSockFd = socket(AF_INET, SOCK_DGRAM, 0);
 
+  // // Open file to transfer from client to server
+  // // - argv[3]: FILENAME
+  int fileToTransferFd = open(argv[3], O_RDONLY);
+  if (fileToTransferFd == -1)
+  {
+    cerr << "ERROR: open()" << endl;
+    exit(1);
+  }
+
+  struct stat fdStat;
+  fstat(fileToTransferFd, &fdStat);
+
+  // sendto(serverSockFd, fileBuffer, bytesRead, MSG_CONFIRM, serverSockAddr, serverSockAddrLength);
+
+  // cout << "DATA sent" << endl;
+
+  // struct sockaddr addr;
+  // socklen_t addr_len = sizeof(struct sockaddr);
+  // memset(fileBuffer, 0, sizeof(fileBuffer));
+  // ssize_t length = recvfrom(serverSockFd, fileBuffer, fdStat.st_size, 0, &addr, &addr_len);
+  // string str((char *)fileBuffer);
+  // cerr << "ACK reveived " << length << " bytes: " << endl
+  //      << str << endl;
+
+  // close(fileToTransferFd);
+
+  // // Print binary
+  // for (long unsigned i = 0; i < sizeof(packet); i += 1)
+  // {
+  //   uint8_t x = (uint8_t)((char *)&packet)[i];
+  //   cout << bitset<8>(x) << endl;
+  // }
+
+  // exit(0);
+
+  // Initialize packet values
   packet_t packet;
-  packet.sequence = 12345;
-  packet.acknowledgment = 0;
-  packet.connectionID = 0;
-  setA(packet, false);
-  setS(packet, true);
-  setF(packet, false);
+  packet.sequence = htonl(12345);
+  packet.acknowledgment = htonl(0);
+  packet.connectionID = htons(0);
+  packet.flags = htons(SYN);
 
-  // create a make shift connection
-  conn_t client_conn;
-  client_conn.ID = 0;
-  client_conn.cwnd = 512;
+  // Print out packet sending
+  printPacket(packet, &client_conn, false);
 
-  // print out packet sending
-  printPacketServer(packet, &client_conn, false);
-
-  // sending packet
+  // Send packet
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  // inputted wait to test connection close
-  // sleep_for(seconds(15));
-  packet = {0};
+
+  // Recieve packet
+  packet = {0}; // reset values
   int n = recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  cerr << "Received: " << n << endl;
+  // cerr << "Received " << n << " bytes!" << endl;
 
-  // print out packet received
-  client_conn.ID = packet.connectionID;
-  client_conn.currentAck = packet.sequence + 1;
-  client_conn.currentSeq = packet.acknowledgment;
-  printPacketServer(packet, &client_conn, true);
+  // Print out packet received
+  client_conn.currentSeq = ntohl(packet.acknowledgment);
+  client_conn.currentAck = ntohl(packet.sequence) + 1;
+  client_conn.ID = ntohs(packet.connectionID);
+  printPacket(packet, &client_conn, true);
 
-  //TESTING START
+  // Hardcoded response from the client to server
 
-  //PACKET 1:
-  // manually hardcoding response from the client to server
+  long int size = fdStat.st_size;
+
+  uint8_t fileBuffer[512];
   packet = {0};
-  packet.sequence = client_conn.currentSeq;
-  packet.acknowledgment = client_conn.currentAck;
-  packet.connectionID = client_conn.ID;
-  setA(packet, true);
-  setS(packet, false);
-  setF(packet, false);
-  strcpy(packet.payload, "Hello World\n");
-  cerr << "Payload: " << packet.payload;
-  printPacketServer(packet, &client_conn, false);
+  packet.sequence = htonl(client_conn.currentSeq);
+  packet.acknowledgment = htonl(client_conn.currentAck);
+  packet.connectionID = htons(client_conn.ID);
+  packet.flags = htons(ACK);
+
+  size_t bytesRead = read(fileToTransferFd, fileBuffer, 512);
+  memcpy(packet.payload, fileBuffer, sizeof(fileBuffer));
+
+  printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
-  
+  client_conn.currentSeq = client_conn.currentSeq + strlen((char *)packet.payload);
+
   // receive response ack from server
   packet = {0};
   recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  printPacketServer(packet, &client_conn, true);
-
-
-
-
-  // //2nd OOO:
-  // client_conn.currentSeq = 100000;
-
-  // packet = {0};
-  // packet.sequence = client_conn.currentSeq;
-  // packet.acknowledgment = client_conn.currentAck;
-  // packet.connectionID = client_conn.ID;
-  // setA(packet, true);
-  // setS(packet, false);
-  // setF(packet, false);
-  // strcpy(packet.payload, "Hello World\n");
-  // cerr << "Payload: " << packet.payload;
-  // printPacketServer(packet, &client_conn, false);
-  // sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  // client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
-  
-  // // receive response ack from server
-  // packet = {0};
-  // recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  // printPacketServer(packet, &client_conn, true);
-
-  // 4th to fill 2nd gap:
-  client_conn.currentSeq = 12382;
-
-  packet = {0};
-  packet.sequence = client_conn.currentSeq;
-  packet.acknowledgment = client_conn.currentAck;
-  packet.connectionID = client_conn.ID;
-  setA(packet, true);
-  setS(packet, false);
-  setF(packet, false);
-  strcpy(packet.payload, "Hello World\n");
-  cerr << "Payload: " << packet.payload;
-  printPacketServer(packet, &client_conn, false);
-  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
-  
-  // receive response ack from server
-  packet = {0};
-  recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  printPacketServer(packet, &client_conn, true);
-
-
-  // 5th to fill 1st gap:
-  client_conn.currentSeq = 12358;
-
-  packet = {0};
-  packet.sequence = client_conn.currentSeq;
-  packet.acknowledgment = client_conn.currentAck;
-  packet.connectionID = client_conn.ID;
-  setA(packet, true);
-  setS(packet, false);
-  setF(packet, false);
-  strcpy(packet.payload, "Hello World\n");
-  cerr << "Payload: " << packet.payload;
-  printPacketServer(packet, &client_conn, false);
-  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
-  
-  // receive response ack from server
-  packet = {0};
-  recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  printPacketServer(packet, &client_conn, true);
-
-  // OOO PACKET 2:
-  client_conn.currentSeq = 12370;
-
-  packet = {0};
-  packet.sequence = client_conn.currentSeq;
-  packet.acknowledgment = client_conn.currentAck;
-  packet.connectionID = client_conn.ID;
-  setA(packet, true);
-  setS(packet, false);
-  setF(packet, false);
-  strcpy(packet.payload, "Hello World\n");
-  cerr << "Payload: " << packet.payload;
-  printPacketServer(packet, &client_conn, false);
-  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
-  
-  // receive response ack from server
-  packet = {0};
-  recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  printPacketServer(packet, &client_conn, true);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  //_____TESTING END_________
+  printPacket(packet, &client_conn, true);
 
   // client_conn.currentAck = packet.sequence + 1;
-  // inputted wait to test connection close
-  // sleep_for(seconds(15));
-
 
   // sending FIN packet
   packet = {0};
-  packet.sequence = 12406; //hardcoded
-  packet.acknowledgment = 0; // ACK = 0 to terminate connection
-  packet.connectionID = client_conn.ID;
-  setA(packet, false);
-  setS(packet, false);
-  setF(packet, true);
-  printPacketServer(packet, &client_conn, false);
+  packet.sequence = htonl(client_conn.currentSeq);
+  packet.acknowledgment = htonl(0); // ACK = 0 to terminate connection
+  packet.connectionID = htons(client_conn.ID);
+  packet.flags = htons(FIN);
+  printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
   client_conn.currentSeq = client_conn.currentSeq + 1;
 
-  // receiving FIN|ACK packet from server
+  // receiving FIN-ACK packet from server
   packet = {0};
   recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  printPacketServer(packet, &client_conn, true);
+  printPacket(packet, &client_conn, true);
 
-  // inputted wait to test fin ACK
-  // sleep_for(seconds(7));
-
-  // sending final ACK to indicate it has received SYN|ACK and to close connection completely
+  // sending final ACK to indicate it has received FIN-ACK and to close connection completely
   packet = {0};
-  packet.sequence = 12407;
-  packet.acknowledgment = 4323;
-  packet.connectionID = client_conn.ID;
-  setA(packet, true);
-  setS(packet, false);
-  setF(packet, false);
+  packet.sequence = htonl(client_conn.currentSeq);
+  packet.acknowledgment = htonl(client_conn.currentAck + 1);
+  packet.connectionID = htons(client_conn.ID);
+  packet.flags = htons(ACK);
 
-  printPacketServer(packet, &client_conn, false);
+  printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
+
+  exit(0);
 }
 
-void setA(packet_t &packet, bool b) {
-  char tmp = packet.flags;
-  // zero out previous flag
-  // 00000011
-  tmp &= 0x03;
-  // set A flag with value b
-  packet.flags = tmp | (b << 2); 
-}
-void setS(packet_t &packet, bool b) {
-  char tmp = packet.flags;
-  // zero out previous flag
-  // 00000101
-  tmp &= 0x05;
-  // set S flag with value b
-  packet.flags = tmp | (b << 1); 
-}
-void setF(packet_t &packet, bool b) {
-  char tmp = packet.flags;
-  // zero out previous flag
-  // 00000110
-  tmp &= 0x06;
-  // set A flag with value b
-  packet.flags = tmp | (b); 
-}
-
-bool getA(packet_t &packet) {
-  char tmp = packet.flags;
+// HELPER FUNCTIONS ==========
+bool getA(packet_t &packet)
+{
+  char tmp = ntohs(packet.flags);
   return (tmp & 0x04);
 }
 
-bool getS(packet_t &packet) {
-  char tmp = packet.flags;
+bool getS(packet_t &packet)
+{
+  char tmp = ntohs(packet.flags);
   return (tmp & 0x02);
 }
 
-bool getF(packet_t &packet) {
-  char tmp = packet.flags;
+bool getF(packet_t &packet)
+{
+  char tmp = ntohs(packet.flags);
   return (tmp & 0x01);
 }
 
-unsigned int payloadSize(packet_t &packet) {
-  return strlen(packet.payload);
+unsigned int payloadSize(packet_t &packet)
+{
+  return strlen((char *)packet.payload);
 }
 
-// printing out packets
-// need to double check formatting
-void printPacketServer(packet_t &packet, conn_t *connection, bool recv) {
-  if (recv) {
+// Print packet info
+void printPacket(packet_t &packet, conn_t *connection, bool recv)
+{
+  if (recv)
     cout << "RECV ";
-  }
-  else {
+  else
     cout << "SEND ";
-  }
-  cout << "seq#: " << packet.sequence << " ack #: " << packet.acknowledgment
-  << " conn_id: " << connection->ID << " cwnd: " << connection->cwnd;
-  
-  if (getA(packet)) {
+
+  cout << ntohl(packet.sequence) << " "
+       << ntohl(packet.acknowledgment) << " "
+       << connection->ID << " "
+       << connection->ssthresh << " "
+       << connection->cwnd;
+
+  if (getA(packet))
     cout << " ACK";
-  }
 
-  if (getS(packet)) {
+  if (getS(packet))
     cout << " SYN";
-  }
 
-  if (getF(packet)) {
+  if (getF(packet))
     cout << " FIN";
-  }
 
-  // add duplicate check at some point as well
+  // TODO: add duplicate check
 
-  // end of print statement, append newline
   cout << endl;
 }
