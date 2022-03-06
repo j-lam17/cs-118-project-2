@@ -471,7 +471,7 @@ bool getF(packet_t &packet)
 
 unsigned int payloadSize(packet_t &packet)
 {
-  return strlen(packet.payload);
+  return sizeof(packet.payload);
 }
 
 // printing out packets
@@ -557,7 +557,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
   unsigned int last_byte = ntohl(packet.sequence) + len;
 
   if ((last_byte - ack) > RWND) {
-    cerr << "OVERFLOW" << endl;
+    // cerr << "OVERFLOW" << endl;
     dropPacketServer(packet);
 
     // create packet to send back acknowledgement
@@ -633,7 +633,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
 
       char payload_to_fill[512];
 
-      strcpy(payload_to_fill, payloads[packet_sequence]->payload);
+      memcpy(payload_to_fill, payloads[packet_sequence]->payload, 512);
 
       *connection->fs << payload_to_fill;
 
@@ -660,7 +660,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
     payload_t *newPayload = new payload_t;
     newPayload->sequence = packet.sequence;
     newPayload->length = len;
-    strcpy(newPayload->payload, packet.payload);
+    memcpy(newPayload->payload, packet.payload, 512);
 
     // add OOO bytes interval to dictionary
     bytes_recieved[newPayload->sequence] = newPayload->length;
