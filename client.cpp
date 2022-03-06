@@ -77,7 +77,7 @@ int main(int argc, char *argv[])
   // Initialize connection values
   conn_t client_conn;
   client_conn.ID = 0;
-  client_conn.ssthresh = 1000;
+  client_conn.ssthresh = 10000;
   client_conn.cwnd = 512;
 
   // Get server address info using hints
@@ -148,7 +148,7 @@ int main(int argc, char *argv[])
   // Recieve packet
   packet = {0}; // reset values
   int n = recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  // cerr << "Received " << n << " bytes!" << endl;
+  // cerr << "\tReceived " << n << " bytes!" << endl;
 
   // Print out packet received
   client_conn.currentSeq = ntohl(packet.acknowledgment);
@@ -167,19 +167,21 @@ int main(int argc, char *argv[])
   packet.connectionID = htons(client_conn.ID);
   packet.flags = htons(ACK);
 
-  size_t bytesRead = read(fileToTransferFd, fileBuffer, 512);
-  memcpy(packet.payload, fileBuffer, sizeof(fileBuffer));
+  size_t bytesRead = read(fileToTransferFd, packet.payload, 512);
 
   printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  client_conn.currentSeq = client_conn.currentSeq + strlen((char *)packet.payload);
+  // cerr << client_conn.currentSeq << endl;
+  client_conn.currentSeq = client_conn.currentSeq + sizeof(packet.payload);
+  // client_conn.currentSeq = client_conn.currentSeq + 512;
+  // cerr << client_conn.currentSeq << endl;
 
   // receive response ack from server
   packet = {0};
   recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
   printPacket(packet, &client_conn, true);
 
-  // client_conn.currentAck = packet.sequence + 1;
+  client_conn.currentAck = packet.sequence + 1;
 
   // sending FIN packet
   packet = {0};
@@ -244,8 +246,8 @@ void printPacket(packet_t &packet, conn_t *connection, bool recv)
   cout << ntohl(packet.sequence) << " "
        << ntohl(packet.acknowledgment) << " "
        << connection->ID << " "
-       << connection->ssthresh << " "
-       << connection->cwnd;
+       << connection->cwnd << " "
+       << connection->ssthresh;
 
   if (getA(packet))
     cout << " ACK";

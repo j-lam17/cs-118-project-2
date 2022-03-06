@@ -2,9 +2,10 @@
 #include <thread>
 #include <iostream>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/types.h>
 #include <time.h>
 #include <signal.h>
 #include <errno.h>
@@ -12,7 +13,10 @@
 #include <cstring>
 #include <unordered_map>
 #include <fstream>
+#include <fcntl.h>
 #include <chrono>
+#include <unistd.h>
+#include <stdio.h>
 
 using namespace std;
 using namespace std::this_thread;
@@ -96,8 +100,6 @@ void appendPayload(packet_t &packet, conn_t *connection);
 static void activeDataHandler(union sigval val);
 static void finalAckHandler(union sigval val);
 
-static void sigHandler(int signum);
-
 // global variables
 // vector to keep track of outstanding connections
 unordered_map<short, conn_t *> connections;
@@ -105,6 +107,7 @@ unordered_map<short, conn_t *> connections;
 string file_directory;
 unsigned int currentConn = 1;
 int server_fd;
+unsigned int recvNum;
 socklen_t addr_len = sizeof(struct sockaddr);
 
 // OOO delivery global variables
@@ -125,7 +128,6 @@ unordered_map<unsigned int, payload_t *> payloads; // key = seq#, val = payload 
 // 2) window tracking function
 // keeping track of acks, sequences, cwnd, all of the stuff in TCP
 
-
 int main(int argc, char *argv[])
 {
   // incorrect number of arguments provided
@@ -135,13 +137,6 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-
-
-  // intializing signal handlers
-  signal(SIGQUIT, sigHandler);
-  signal(SIGTERM, sigHandler);
-
-
   int port = atoi(argv[1]);
   file_directory = argv[2];
 
@@ -150,7 +145,7 @@ int main(int argc, char *argv[])
   // destination where data is received
   packet_t incomingPacket;
   // # of bytes received
-  int recvNum;
+  // int recvNum;
   // indicates whether it is the start of a connection
   bool syn, fin;
 
@@ -184,7 +179,7 @@ int main(int argc, char *argv[])
   int ret;
   if ((ret = getaddrinfo(NULL, argv[1], &hints, &myAddrInfo)) != 0)
   {
-    cerr << "error" << endl;
+    cerr << "ERROR" << endl;
     exit(1);
   }
 
@@ -214,7 +209,10 @@ int main(int argc, char *argv[])
     else if (fin)
     {
       // start closing of a connection
+      // printPacketServer(packet, connection, true);
+      // cerr << "FIN DETECTED" <<endl; 
       finHandshake(incomingPacket);
+      
     }
     // conditonal branch for a packet without SYN flag
     else
@@ -262,6 +260,8 @@ bool ackPacket(packet_t &incomingPacket)
 // create a new connection
 void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client)
 {
+
+  // cerr << "Entered 3way\n";
   conn_t *newC = new conn_t;
 
   // indicates new connection
@@ -285,7 +285,7 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client)
     delete newC;
     return;
   }
-  
+
   // Creating client's timer for 10s to close if no data is received
   newC->ptrTimerid = new timer_t;
   newC->ptrSev = new struct sigevent;
@@ -298,10 +298,10 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client)
   // initializing what to do when the signal occurs
   newC->ptrSev->sigev_notify = SIGEV_THREAD;
   newC->ptrSev->sigev_notify_function = activeDataHandler;
-  newC->ptrSev->sigev_notify_attributes=NULL;
+  newC->ptrSev->sigev_notify_attributes = NULL;
   newC->ptrSev->sigev_value = arg;
   timer_create(CLOCKID, newC->ptrSev, newC->ptrTimerid);
-      
+
   newC->ptrIts->it_value.tv_sec = 10;
   newC->ptrIts->it_value.tv_nsec = 0;
   newC->ptrIts->it_interval.tv_sec = 0;
@@ -331,7 +331,6 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client)
   // printing out sent packet
   printPacketServer(incomingPacket, newC, false);
 
-
   // update next sequence number to be + 1
   newC->currentSeq++;
 
@@ -356,6 +355,8 @@ void finHandshake(packet_t &incomingPacket)
   {
     conn_t *connection = connections[ID];
 
+    printPacketServer(incomingPacket, connection, true);
+
     // checking that the current sequence matches the last sent ack
     if (connection->currentAck != ntohl(incomingPacket.sequence))
     {
@@ -363,6 +364,9 @@ void finHandshake(packet_t &incomingPacket)
       // received all of the necessary bytes yet
       return;
     }
+
+    // cerr <<"WAITING FOR ACK" << endl;
+
     // indicate that it is waiting for an ACK to close
     connection->waitingForAck = true;
     // ASSUMING THAT THERE IS NO OUTSTANDING MISSING PACKETS / BYTES
@@ -373,27 +377,14 @@ void finHandshake(packet_t &incomingPacket)
     // don't need to update seqnum for fin|ack
     connection->currentAck = (connection->currentAck + 1) % (MAX_ACK + 1);
     connToHeader(connection, incomingPacket);
-    setA(incomingPacket, true);
-    setS(incomingPacket, false);
-    setF(incomingPacket, true);
+
+    incomingPacket.flags = htons(FIN_ACK);
+    // setA(incomingPacket, true);
+    // setS(incomingPacket, false);
+    // setF(incomingPacket, true);
 
     // send the packet response
     sendto(server_fd, &incomingPacket, PACKET_SIZE, 0, &connection->addr, addr_len);
-    
-    // Setting necessary timer to wait for final ACK from client
-    // need to delete previous timer for 10s data
-    timer_delete(*connection->ptrTimerid);
-    // updating handler function
-    connection->ptrSev->sigev_notify_function = finalAckHandler;
-    // create a new timer object
-    timer_create(CLOCKID, connection->ptrSev, connection->ptrTimerid);
-    // arm the timer
-    connection->ptrIts->it_value.tv_sec = 2;
-    connection->ptrIts->it_value.tv_nsec = 0;
-    connection->ptrIts->it_interval.tv_sec = 2;
-    connection->ptrIts->it_interval.tv_nsec = 0;
-
-    timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
 
     // Setting necessary timer to wait for final ACK from client
     // need to delete previous timer for 10s data
@@ -471,7 +462,8 @@ bool getF(packet_t &packet)
 
 unsigned int payloadSize(packet_t &packet)
 {
-  return sizeof(packet.payload);
+  // return strlen(packet.payload);
+  return recvNum - 12;
 }
 
 // printing out packets
@@ -510,8 +502,6 @@ void printPacketServer(packet_t &packet, conn_t *connection, bool recv)
   {
     msg += " FIN";
   }
-  
-  msg += '\n';
 
   msg += '\n';
 
@@ -549,24 +539,30 @@ void dropPacketServer(packet_t &packet)
 void appendPayload(packet_t &packet, conn_t *connection)
 {
   // print out the received packet
-  // printPacketServer(packet, connection, true);
+  printPacketServer(packet, connection, true);
 
   int len = payloadSize(packet);
 
   //handling overflowing rwnd:
   unsigned int last_byte = ntohl(packet.sequence) + len;
 
-  if ((last_byte - ack) > RWND) {
-    // cerr << "OVERFLOW" << endl;
+  if (last_byte  < connection-> currentAck){//wrap around happened
+    last_byte += MAX_ACK;
+
+  }
+
+  if ((last_byte - connection->currentAck) > RWND) {
+    cerr << "last_byte: " << last_byte <<endl;
+    cerr << "ack: " << ack << endl; 
+    cerr << "OVERFLOW DROP" << endl;
     dropPacketServer(packet);
 
     // create packet to send back acknowledgement
     //since dropped packet, nothing happens
     packet = {0};
     connToHeader(connection, packet);
-    setA(packet, true);
-    setS(packet, false);
-    setF(packet, false);
+
+    packet.flags = htons(ACK);
 
     // need to print out packet sent
     printPacketServer(packet, connection, false);
@@ -574,7 +570,6 @@ void appendPayload(packet_t &packet, conn_t *connection)
     // send the packet to the respective client
     sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
 
-    
     return;
   }
   else if (last_byte > last_byte_read){//not overflow
@@ -586,6 +581,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
   if (last_byte_read > MAX_ACK){
     last_byte_read = last_byte_read % MAX_ACK;
   }
+
 
   // 1. In Order Delivery:
   if (ntohl(packet.sequence) == connection->currentAck)
@@ -616,14 +612,17 @@ void appendPayload(packet_t &packet, conn_t *connection)
     // need to update this to reset timer whenever a packet is received
     // reset the timer delay to 10s
     timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
+
     // append payload to existing file
     *connection->fs << packet.payload;
 
     // update current ACK, seqNum only increments on SYN and FIN, not for ACK
     connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
-    
-    //check if in order packet fills a gap
-    while (payloads.find(connection->currentAck) != payloads.end()){ //while there's an OOO packet that is now ready
+
+    // check if in order packet fills a gap
+    while (payloads.find(connection->currentAck) != payloads.end())
+    { // while there's an OOO packet that is now ready
+      // cerr <<"IN WHILE LOOP" << endl;
       int packet_sequence = connection->currentAck;
       int packet_length = bytes_recieved[packet_sequence];
 
@@ -637,7 +636,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
 
       *connection->fs << payload_to_fill;
 
-      //remove entry from bytes_to_read:
+      // remove entry from bytes_to_read:
       bytes_recieved.erase(packet_sequence);
 
       // remote entry from payloads:
@@ -648,15 +647,16 @@ void appendPayload(packet_t &packet, conn_t *connection)
     connToHeader(connection, packet);
     packet.flags = htons(ACK);
 
+    // send the packet to the respective client
+    sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
+
     // need to print out packet sent
     printPacketServer(packet, connection, false);
-
-    // send the packet to the respective client
-    sendto(server_fd, &packet, 12, 0, &connection->addr, addr_len);
   }
   // 2. Out of Order Delivery:
   else
   {
+    // cerr <<"OOO" << endl;
     payload_t *newPayload = new payload_t;
     newPayload->sequence = packet.sequence;
     newPayload->length = len;
@@ -707,7 +707,7 @@ activeDataHandler(union sigval val)
 static void
 finalAckHandler(union sigval val)
 {
-  cerr << "Sending FIN-ACK: " << endl;
+  // cerr << "Sending FIN-ACK: " << endl;
   // find the existing connection
   conn_t *connection = connections[val.sival_int];
   // need to retransmit the previous fin packet
@@ -717,9 +717,4 @@ finalAckHandler(union sigval val)
 
   // print out the packet
   printPacketServer(packet, connection, false);
-}
-
-static void sigHandler(int signum) {
-  cerr << "Caught signal\n";
-  exit(0);
 }
