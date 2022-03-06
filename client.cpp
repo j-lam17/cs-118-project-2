@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -20,14 +21,6 @@
 
 using namespace std;
 
-typedef struct header_t
-{
-  uint32_t sequence;
-  uint32_t acknowledgment;
-  uint16_t connectionID;
-  uint16_t flags;
-} header_t;
-
 #define PACKET_SIZE 524
 #define ACK 0x04     // 00000100
 #define SYN 0x02     // 00000010
@@ -41,7 +34,7 @@ typedef struct packet_t
   uint32_t acknowledgment;
   uint16_t connectionID;
   uint16_t flags;
-  char payload[512];
+  uint8_t payload[512];
 } packet_t;
 
 typedef struct conn_t
@@ -81,6 +74,12 @@ int main(int argc, char *argv[])
   hints.ai_socktype = SOCK_DGRAM; // UDP socket
   hints.ai_family = AF_INET;      // IPv4
 
+  // Initialize connection values
+  conn_t client_conn;
+  client_conn.ID = 0;
+  client_conn.ssthresh = 1000;
+  client_conn.cwnd = 512;
+
   // Get server address info using hints
   // - argv[1]: HOSTNAME-OR-IP
   // - argv[2]: PORT#
@@ -100,18 +99,15 @@ int main(int argc, char *argv[])
 
   // // Open file to transfer from client to server
   // // - argv[3]: FILENAME
-  // int fileToTransferFd = open(argv[3], O_RDONLY);
-  // if (fileToTransferFd == -1)
-  // {
-  //   cerr << "ERROR: open()" << endl;
-  //   exit(1);
-  // }
+  int fileToTransferFd = open(argv[3], O_RDONLY);
+  if (fileToTransferFd == -1)
+  {
+    cerr << "ERROR: open()" << endl;
+    exit(1);
+  }
 
-  // struct stat fdStat;
-  // fstat(fileToTransferFd, &fdStat);
-  // uint8_t fileBuffer[fdStat.st_size];
-  // size_t bytesRead = read(fileToTransferFd, fileBuffer, fdStat.st_size);
-  // cout << bytesRead << " bytes read" << endl;
+  struct stat fdStat;
+  fstat(fileToTransferFd, &fdStat);
 
   // sendto(serverSockFd, fileBuffer, bytesRead, MSG_CONFIRM, serverSockAddr, serverSockAddrLength);
 
@@ -127,17 +123,6 @@ int main(int argc, char *argv[])
 
   // close(fileToTransferFd);
 
-  // cout << "Header size: " << sizeof(myHeader) << endl
-  //      << endl;
-
-  // for (long unsigned i = 0; i < sizeof(myHeader); i += 1)
-  // {
-  //   uint8_t x = (uint8_t)((char *)&myHeader)[i];
-  //   cout << bitset<8>(x) << endl;
-  // }
-
-  // exit(0);
-
   // // Print binary
   // for (long unsigned i = 0; i < sizeof(packet); i += 1)
   // {
@@ -146,12 +131,6 @@ int main(int argc, char *argv[])
   // }
 
   // exit(0);
-
-  // Initialize connection values
-  conn_t client_conn;
-  client_conn.ID = 0;
-  client_conn.ssthresh = 1000;
-  client_conn.cwnd = 512;
 
   // Initialize packet values
   packet_t packet;
@@ -178,17 +157,22 @@ int main(int argc, char *argv[])
   printPacket(packet, &client_conn, true);
 
   // Hardcoded response from the client to server
+
+  long int size = fdStat.st_size;
+
+  uint8_t fileBuffer[512];
   packet = {0};
   packet.sequence = htonl(client_conn.currentSeq);
   packet.acknowledgment = htonl(client_conn.currentAck);
   packet.connectionID = htons(client_conn.ID);
   packet.flags = htons(ACK);
 
-  strcpy(packet.payload, "Hello World\n");
-  cerr << "Payload: " << packet.payload;
+  size_t bytesRead = read(fileToTransferFd, fileBuffer, 512);
+  memcpy(packet.payload, fileBuffer, sizeof(fileBuffer));
+
   printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  client_conn.currentSeq = client_conn.currentSeq + strlen(packet.payload);
+  client_conn.currentSeq = client_conn.currentSeq + strlen((char *)packet.payload);
 
   // receive response ack from server
   packet = {0};
@@ -199,10 +183,10 @@ int main(int argc, char *argv[])
 
   // sending FIN packet
   packet = {0};
-  packet.sequence = client_conn.currentSeq;
-  packet.acknowledgment = 0; // ACK = 0 to terminate connection
-  packet.connectionID = client_conn.ID;
-  packet.flags = FIN;
+  packet.sequence = htonl(client_conn.currentSeq);
+  packet.acknowledgment = htonl(0); // ACK = 0 to terminate connection
+  packet.connectionID = htons(client_conn.ID);
+  packet.flags = htons(FIN);
   printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
   client_conn.currentSeq = client_conn.currentSeq + 1;
@@ -214,10 +198,10 @@ int main(int argc, char *argv[])
 
   // sending final ACK to indicate it has received FIN-ACK and to close connection completely
   packet = {0};
-  packet.sequence = client_conn.currentSeq;
-  packet.acknowledgment = client_conn.currentAck + 1;
-  packet.connectionID = client_conn.ID;
-  packet.flags = ACK;
+  packet.sequence = htonl(client_conn.currentSeq);
+  packet.acknowledgment = htonl(client_conn.currentAck + 1);
+  packet.connectionID = htons(client_conn.ID);
+  packet.flags = htons(ACK);
 
   printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
@@ -225,6 +209,7 @@ int main(int argc, char *argv[])
   exit(0);
 }
 
+// HELPER FUNCTIONS ==========
 bool getA(packet_t &packet)
 {
   char tmp = ntohs(packet.flags);
@@ -245,11 +230,10 @@ bool getF(packet_t &packet)
 
 unsigned int payloadSize(packet_t &packet)
 {
-  return strlen(packet.payload);
+  return strlen((char *)packet.payload);
 }
 
-// printing out packets
-// need to double check formatting
+// Print packet info
 void printPacket(packet_t &packet, conn_t *connection, bool recv)
 {
   if (recv)
