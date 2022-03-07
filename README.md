@@ -34,5 +34,21 @@ To dissect tcpdump-recorded file, you can use `-r <pcapfile>` option. For exampl
 ## PROJECT REPORT
 
 Grace Ma (204881323)
+
 Desmond Andersen (605391825)
+
+- Focused on client. Implemented host-to-network byte order conversion (and vice versa) and congestion window adjustment. Also worked on (to a lesser degree of success) the client small file transfer, connection abortion, and responding with ACK for incoming FINs for 2 seconds.
+
 Jonathan Lam (605415001)
+
+_Design_
+
+Client and server written in C++ using BSD sockets to communicate via UDP datagrams. The client establishes a three-way handshake with the server , then sends a file packaged in one or more UDP datagrams. Additionally the client uses a retransmission timer to resend any lost packets, and utilizes congestion control as to not overload the network. When client finishes sending the file it sends a FIN packet to initiate the shutting-down phase and close the connection. The server listens for incoming connections from clients and manages multiple connections. It saves any files recieved in a local directory. When recieving a FIN, the server will participate in the 4-way handwave to close the connection.
+
+_Problems_
+
+- During the file send process in the client, we kept getting strange ASCII characters at the end of the save files. To solve this, we had to first read the data from the file into a temporary buffer, then copy it into the payload. Also we initially were using `strlen` on the payload instead of `12 + <bytes-read>`.
+
+- In the server we were initially using filestream instead of the binary file reader. We also ran into the issue that a stream has to be closed in order for the buffer to be flushed and the file to be readable.
+
+- Ran into issues with using the autograder on M1 chip Macbooks. Queried Piazza and pulled Xinyu's latest updates to work with arm processors.
