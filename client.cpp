@@ -28,6 +28,11 @@ using namespace std;
 #define SYN_ACK 0x06 // 00000110
 #define FIN_ACK 0x05 // 00000101
 
+static size_t bytesRead;
+static int serverSockFd;
+static sockaddr *serverSockAddr;
+static socklen_t serverSockAddrLength;
+
 typedef struct packet_t
 {
   uint32_t sequence;
@@ -59,6 +64,17 @@ bool getF(packet_t &packet);
 unsigned int payloadSize(packet_t &packet);
 void printPacket(packet_t &packet, conn_t *connection, bool recv);
 
+// Timer handler
+static void
+abortHandler(union sigval val)
+{
+  close(serverSockFd);
+  cerr << "ERROR: aborting connection (no packets recieved)" << endl;
+  exit(1);
+  // sendto(serverSockFd, val.sival_ptr, bytesRead, MSG_CONFIRM, serverSockAddr, serverSockAddrLength);
+}
+
+// MAIN ==========
 int main(int argc, char *argv[])
 {
   if (argc != 4)
@@ -90,12 +106,12 @@ int main(int argc, char *argv[])
     exit(1);
   }
 
-  sockaddr *serverSockAddr = result->ai_addr;
-  socklen_t serverSockAddrLength = result->ai_addrlen;
+  serverSockAddr = result->ai_addr;
+  serverSockAddrLength = result->ai_addrlen;
 
   // Create a UDP socket
   // - int socket(int domain, int type, int protocol)
-  int serverSockFd = socket(AF_INET, SOCK_DGRAM, 0);
+  serverSockFd = socket(AF_INET, SOCK_DGRAM, 0);
 
   // // Open file to transfer from client to server
   // // - argv[3]: FILENAME
@@ -109,28 +125,6 @@ int main(int argc, char *argv[])
   struct stat fdStat;
   fstat(fileToTransferFd, &fdStat);
 
-  // sendto(serverSockFd, fileBuffer, bytesRead, MSG_CONFIRM, serverSockAddr, serverSockAddrLength);
-
-  // cout << "DATA sent" << endl;
-
-  // struct sockaddr addr;
-  // socklen_t addr_len = sizeof(struct sockaddr);
-  // memset(fileBuffer, 0, sizeof(fileBuffer));
-  // ssize_t length = recvfrom(serverSockFd, fileBuffer, fdStat.st_size, 0, &addr, &addr_len);
-  // string str((char *)fileBuffer);
-  // cerr << "ACK reveived " << length << " bytes: " << endl
-  //      << str << endl;
-
-  // close(fileToTransferFd);
-
-  // // Print binary
-  // for (long unsigned i = 0; i < sizeof(packet); i += 1)
-  // {
-  //   uint8_t x = (uint8_t)((char *)&packet)[i];
-  //   cout << bitset<8>(x) << endl;
-  // }
-
-  // exit(0);
 
   // Initialize packet values
   packet_t packet;
@@ -142,21 +136,52 @@ int main(int argc, char *argv[])
   // Print out packet sending
   printPacket(packet, &client_conn, false);
 
-  // Send packet
+  // Send SYN packet
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
 
-  // Recieve packet
+  // Timer variables
+  timer_t timerid;
+  struct sigevent sev;
+  struct itimerspec its;
+
+  // Create the timer
+  union sigval arg;
+  arg.sival_ptr = &packet;
+
+  sev.sigev_notify = SIGEV_THREAD;
+  sev.sigev_notify_function = abortHandler;
+  sev.sigev_notify_attributes = NULL;
+  sev.sigev_value = arg;
+  timer_create(CLOCK_MONOTONIC, &sev, &timerid);
+
+  // Start the 10 seconds timer
+  its.it_value.tv_sec = 10;
+  its.it_value.tv_nsec = 0;
+  its.it_interval.tv_sec = 10;
+  its.it_interval.tv_nsec = 0;
+  timer_settime(timerid, 0, &its, NULL);
+
+  // Recieve SYN_ACK packet
   packet = {0}; // reset values
   int n = recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
-  // cerr << "\tReceived " << n << " bytes!" << endl;
 
-  // Print out packet received
-  client_conn.currentSeq = ntohl(packet.acknowledgment);
-  client_conn.currentAck = ntohl(packet.sequence) + 1;
-  client_conn.ID = ntohs(packet.connectionID);
-  printPacket(packet, &client_conn, true);
+  if (n > 0)
+  {
+    // Print out packet received
+    client_conn.currentSeq = ntohl(packet.acknowledgment);
+    client_conn.currentAck = ntohl(packet.sequence) + 1;
+    client_conn.ID = ntohs(packet.connectionID);
+    printPacket(packet, &client_conn, true);
 
-  // Hardcoded response from the client to server
+    // Disarm timer
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 0;
+    timer_settime(timerid, 0, &its, NULL);
+  }
+
+  // Hardcoded response from the client to server, start sending data
 
   long int size = fdStat.st_size;
 
@@ -169,19 +194,21 @@ int main(int argc, char *argv[])
 
   size_t bytesRead = read(fileToTransferFd, packet.payload, 512);
 
+  // cerr << "Payload:\n"
+  //      << packet.payload << endl;
+
+  // memcpy(packet.payload, fileBuffer, sizeof(fileBuffer));
+
   printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
-  // cerr << client_conn.currentSeq << endl;
-  client_conn.currentSeq = client_conn.currentSeq + sizeof(packet.payload);
-  // client_conn.currentSeq = client_conn.currentSeq + 512;
-  // cerr << client_conn.currentSeq << endl;
+  client_conn.currentSeq = client_conn.currentSeq + strlen((char *)packet.payload);
 
   // receive response ack from server
   packet = {0};
   recvfrom(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, &serverSockAddrLength);
   printPacket(packet, &client_conn, true);
 
-  client_conn.currentAck = packet.sequence + 1;
+  // client_conn.currentAck = packet.sequence + 1;
 
   // sending FIN packet
   packet = {0};
@@ -208,6 +235,8 @@ int main(int argc, char *argv[])
   printPacket(packet, &client_conn, false);
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
 
+  close(serverSockFd);
+  close(fileToTransferFd);
   exit(0);
 }
 
