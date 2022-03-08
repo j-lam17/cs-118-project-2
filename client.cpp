@@ -187,7 +187,6 @@ int main(int argc, char *argv[]) {
   // size of the file
   long int size = fdStat.st_size;
   // cerr << "DEBUG: file size = " << size << " bytes" << endl;
-  // cerr << "DEBUG: # of packets need = " << (size / 512) + 1 << endl;
 
   char sendBuf[512];
   int bytesRead;
@@ -272,9 +271,9 @@ int main(int argc, char *argv[]) {
         timer_settime(timerid, 0, &its, NULL);
 
         // Update CWND
-        if (client_conn.cwnd + 512 < client_conn.ssthresh) // Slow-start mode
+        if (client_conn.cwnd < client_conn.ssthresh) // Slow-start mode
           client_conn.cwnd += 512;
-        else if (client_conn.cwnd + 512 < MAX_CWND) // Congestion avoidance
+        else if (client_conn.cwnd  < MAX_CWND) // Congestion avoidance
           client_conn.cwnd += ((512 * 512) / client_conn.cwnd);
         else
           client_conn.cwnd = MAX_CWND; // Max-out
