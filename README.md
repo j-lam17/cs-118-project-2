@@ -53,7 +53,8 @@ Jonathan Lam (605415001)
 
 Desmond Andersen (605391825)
 
-- Focused on client. Implemented host-to-network byte order conversion (and vice versa) and congestion window adjustment. Also worked on (to a lesser degree of success) the client small file transfer, connection abortion, and responding with ACK for incoming FINs for 2 seconds.
+- Focused on client. Implemented host-to-network byte order conversion (and vice versa) and congestion window adjustment, along with RTO and retransmission.
+- Also worked on (to a lesser degree of success) the client small file transfer, connection abortion, and responding with ACK for incoming FINs for 2 seconds.
 
 
 _Design_
