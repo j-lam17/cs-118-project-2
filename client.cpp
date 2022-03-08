@@ -33,14 +33,13 @@ static int serverSockFd;
 static sockaddr *serverSockAddr;
 static socklen_t serverSockAddrLength;
 
-
 typedef struct packet_t {
   unsigned int sequence;
   unsigned int acknowledgment;
   unsigned short connectionID;
   char empty;
   char flags;
-  char payload[512]; 
+  char payload[512];
 } packet_t;
 
 typedef struct conn_t {
@@ -48,7 +47,7 @@ typedef struct conn_t {
   unsigned short ID = 0;
   // initialize current sequence number to 4321
   unsigned int currentSeq = 12345;
-  unsigned int currentAck = 0; 
+  unsigned int currentAck = 0;
   // need to add necessary congestion variables
   unsigned int cwnd = MIN_CWND;
   unsigned int ssthresh = INIT_SSTHRESH;
@@ -62,8 +61,8 @@ bool getA(packet_t &packet);
 bool getS(packet_t &packet);
 bool getF(packet_t &packet);
 void printPacket(packet_t &packet, conn_t *connection, bool recv);
-void recvPacket(packet_t &packet);
-void sendPacket(packet_t &packet);
+void ntohPacket(packet_t &packet);
+void htonPacket(packet_t &packet);
 bool finPacket(packet_t &incomingPacket);
 void dropPacket(packet_t &packet);
 
@@ -72,8 +71,7 @@ int fileToTransferFd;
 
 // Timer handler
 static void
-abortHandler(union sigval val)
-{
+abortHandler(union sigval val) {
   close(serverSockFd);
   cerr << "ERROR: aborting connection due to no packets within 10s" << endl;
   exit(1);
@@ -84,11 +82,11 @@ static void
 finHandler(union sigval val) {
   close(fileToTransferFd);
   close(serverSockFd);
-  cerr << "Closing file transmission connection\n";
+  // cerr << "DEBUG: Closing file transmission connection\n";
   exit(0);
 }
 
-static void 
+static void
 RTO(union sigval val) {
   // ssthresh -> cwnd / 2
   // cwnd = 512
@@ -99,10 +97,8 @@ RTO(union sigval val) {
 }
 
 // MAIN ==========
-int main(int argc, char *argv[])
-{
-  if (argc != 4)
-  {
+int main(int argc, char *argv[]) {
+  if (argc != 4) {
     cerr << "ERROR: Usage: " << argv[0] << " <HOSTNAME-OR-IP> <PORT> <FILENAME>" << endl;
     exit(1);
   }
@@ -118,8 +114,7 @@ int main(int argc, char *argv[])
   // - argv[1]: HOSTNAME-OR-IP
   // - argv[2]: PORT#
   int ret;
-  if ((ret = getaddrinfo(argv[1], argv[2], &hints, &result)) != 0)
-  {
+  if ((ret = getaddrinfo(argv[1], argv[2], &hints, &result)) != 0) {
     cerr << "ERROR: " << ret << endl;
     exit(1);
   }
@@ -134,8 +129,7 @@ int main(int argc, char *argv[])
   // // Open file to transfer from client to server
   // // - argv[3]: FILENAME
   fileToTransferFd = open(argv[3], O_RDONLY);
-  if (fileToTransferFd == -1)
-  {
+  if (fileToTransferFd == -1) {
     cerr << "ERROR: open()" << endl;
     exit(1);
   }
@@ -154,7 +148,7 @@ int main(int argc, char *argv[])
   printPacket(packet, &client_conn, false);
 
   // network ordering
-  sendPacket(packet);
+  htonPacket(packet);
 
   // Send packet
   // syn packet is always size 12
@@ -180,7 +174,7 @@ int main(int argc, char *argv[])
   // Receive packet
   packet = {0}; // reset values
   recvfrom(serverSockFd, &packet, 12, 0, serverSockAddr, &serverSockAddrLength);
-  recvPacket(packet);
+  ntohPacket(packet);
   printPacket(packet, &client_conn, true);
 
   // extract client number
@@ -189,13 +183,14 @@ int main(int argc, char *argv[])
 
   // change to reset timer here
   timer_settime(timerid, 0, &its, NULL);
-  // sending file in packets of size 512 always 
+  // sending file in packets of size 512 always
   // size of the file
   long int size = fdStat.st_size;
-  cerr << "size: " << size << endl;
-  
+  // cerr << "DEBUG: file size = " << size << " bytes" << endl;
+  // cerr << "DEBUG: # of packets need = " << (size / 512) + 1 << endl;
+
   char sendBuf[512];
-  int len;
+  int bytesRead;
   bool first = true;
 
   // Timer variables for RTO
@@ -214,44 +209,81 @@ int main(int argc, char *argv[])
   itsRTO.it_interval.tv_sec = 2;
   itsRTO.it_interval.tv_nsec = 0;
 
+  // Loop through file data
+  long int bytesLeftToRead = size;
+  while (bytesLeftToRead > 0) {
+    // Calculate # of packets left to send
+    int nPacketsLeft = (bytesLeftToRead / 512);
+    if (bytesLeftToRead % 512 > 0)
+      nPacketsLeft += 1;
 
-  for (int i = 0; i <= (size / 512); i++) {
-    // clear out variables for sending
-    packet = {0};
-    memset(sendBuf, 0, 512);
-    connToHeader(&client_conn, packet);
-    if (first) {
-      setA(packet, true);
-      first = false;
+    // Calculate # of packets we can send out
+    int nPackets = client_conn.cwnd / 512;
+    if (nPackets > nPacketsLeft)
+      nPackets = nPacketsLeft;
+
+    for (int i = 0; i < nPackets; i++) {
+      // Clear datagram
+      packet = {0};
+
+      // Populate header
+      bool isFirstPacket = (bytesLeftToRead == size);
+      if (!isFirstPacket)
+        client_conn.currentAck = 0;
+      connToHeader(&client_conn, packet);
+
+      // Set flags
+      setA(packet, isFirstPacket);
+      setS(packet, false);
+      setF(packet, false);
+
+      // Read from file and copy into packet
+      memset(sendBuf, 0, 512);
+      bytesRead = read(fileToTransferFd, sendBuf, 512);
+      memcpy(packet.payload, sendBuf, bytesRead);
+      bytesLeftToRead -= 512;
+
+      // Send packet
+      printPacket(packet, &client_conn, false);
+      htonPacket(packet);
+      sendto(serverSockFd, &packet, 12 + bytesRead, 0, serverSockAddr, serverSockAddrLength);
+
+      // Update sequence #
+      client_conn.currentSeq = (client_conn.currentSeq + bytesRead) % (MAX_ACK + 1);
     }
-    else {
-      setA(packet, false);
+
+    for (int i = 0; i < nPackets; i++) {
+      // Set RTO + clear packet data
+      timer_settime(timeridRTO, 0, &itsRTO, NULL);
+      packet = {0};
+
+      // Wait for a response from server
+      recvfrom(serverSockFd, &packet, 12, 0, serverSockAddr, &serverSockAddrLength);
+      ntohPacket(packet);
+
+      // Validate incoming packet
+      if (packet.connectionID == client_conn.ID) {
+        printPacket(packet, &client_conn, true);
+
+        // Reset RTO timer (ASSUMING CORRECT IN ORDER ACK)
+        timer_settime(timeridRTO, 0, &itsRTO, NULL);
+
+        // Reset 10s timer for receiving data
+        timer_settime(timerid, 0, &its, NULL);
+
+        // Update CWND
+        if (client_conn.cwnd + 512 < client_conn.ssthresh) // Slow-start mode
+          client_conn.cwnd += 512;
+        else if (client_conn.cwnd + 512 < MAX_CWND) // Congestion avoidance
+          client_conn.cwnd += ((512 * 512) / client_conn.cwnd);
+        else
+          client_conn.cwnd = MAX_CWND; // Max-out
+      }
+      // Drop packets from unknown senders
+      else {
+        dropPacket(packet);
+      }
     }
-    setS(packet, false);
-    setF(packet, false);
-
-    len = read(fileToTransferFd, sendBuf, 512);
-    memcpy(packet.payload, sendBuf, len);
-
-    printPacket(packet, &client_conn, false);
-
-    sendPacket(packet);
-
-    sendto(serverSockFd, &packet, 12 + len, 0, serverSockAddr, serverSockAddrLength);
-    // setting RTO for first packet
-    timer_settime(timeridRTO, 0, &itsRTO, NULL);
-    // increment seqnum
-    client_conn.currentSeq = (client_conn.currentSeq + len) % (MAX_ACK + 1);
-
-    packet = {0};
-    // now deal with receiving response ack from server
-    recvfrom(serverSockFd, &packet, 12, 0, serverSockAddr, &serverSockAddrLength);
-    // reset RTO timer, ASSUMING CORRECT IN ORDER ACK
-    timer_settime(timeridRTO, 0, &itsRTO, NULL);
-    // reset 10s timer for receiving data
-    timer_settime(timerid, 0, &its, NULL);
-    // update necessary client metadata
-    // temporarily nothing assuming perfect transport
   }
 
   // sending FIN packet
@@ -264,12 +296,11 @@ int main(int argc, char *argv[])
 
   printPacket(packet, &client_conn, false);
 
-  sendPacket(packet);
-
+  htonPacket(packet);
   sendto(serverSockFd, &packet, 12, 0, serverSockAddr, serverSockAddrLength);
   client_conn.currentSeq = (client_conn.currentSeq + 1) % (MAX_ACK + 1);
-  
-  // need to change the timer 
+
+  // need to change the timer
   sev.sigev_notify = SIGEV_THREAD;
   sev.sigev_notify_function = finHandler;
   sev.sigev_notify_attributes = NULL;
@@ -285,19 +316,20 @@ int main(int argc, char *argv[])
   // increment to 4323
   client_conn.currentAck++;
 
-  // loop until timer goes off 
+  // loop until timer goes off
   while (1) {
     packet = {0};
     // now deal with receiving response ack from server
-    cerr << "Waiting to read\n";
+    // cerr << "DEBUG: Waiting to read\n";
     recvfrom(serverSockFd, &packet, 12, 0, serverSockAddr, &serverSockAddrLength);
-    cerr << "read after ack" << endl;
-    recvPacket(packet);
+    // cerr << "DEBUG: read after ack" << endl;
+    ntohPacket(packet);
     // condition where it is a FIN packet
     // respond with an ACK
     if (finPacket(packet)) {
       printPacket(packet, &client_conn, true);
 
+      client_conn.currentAck = packet.sequence + 1;
       connToHeader(&client_conn, packet);
       setA(packet, true);
       setS(packet, false);
@@ -305,7 +337,7 @@ int main(int argc, char *argv[])
 
       printPacket(packet, &client_conn, false);
 
-      sendPacket(packet);
+      htonPacket(packet);
 
       sendto(serverSockFd, &packet, 12, 0, serverSockAddr, serverSockAddrLength);
     }
@@ -321,7 +353,7 @@ int main(int argc, char *argv[])
   packet = {0};
   recvfrom(serverSockFd, &packet, 12, 0, serverSockAddr, &serverSockAddrLength);
 
-  recvPacket(packet);
+  ntohPacket(packet);
 
   printPacket(packet, &client_conn, true);
 
@@ -334,7 +366,7 @@ int main(int argc, char *argv[])
 
   printPacket(packet, &client_conn, false);
 
-  sendPacket(packet);
+  htonPacket(packet);
 
   sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
   close(serverSockFd);
@@ -349,7 +381,7 @@ void setA(packet_t &packet, bool b) {
   // 00000011
   tmp &= 0x03;
   // set A flag with value b
-  packet.flags = tmp | (b << 2); 
+  packet.flags = tmp | (b << 2);
 }
 void setS(packet_t &packet, bool b) {
   char tmp = packet.flags;
@@ -357,7 +389,7 @@ void setS(packet_t &packet, bool b) {
   // 00000101
   tmp &= 0x05;
   // set S flag with value b
-  packet.flags = tmp | (b << 1); 
+  packet.flags = tmp | (b << 1);
 }
 void setF(packet_t &packet, bool b) {
   char tmp = packet.flags;
@@ -365,7 +397,7 @@ void setF(packet_t &packet, bool b) {
   // 00000110
   tmp &= 0x06;
   // set A flag with value b
-  packet.flags = tmp | (b); 
+  packet.flags = tmp | (b);
 }
 
 bool getA(packet_t &packet) {
@@ -384,8 +416,7 @@ bool getF(packet_t &packet) {
 }
 
 // Print packet info
-void printPacket(packet_t &packet, conn_t *connection, bool recv)
-{
+void printPacket(packet_t &packet, conn_t *connection, bool recv) {
   if (recv)
     cout << "RECV ";
   else
@@ -411,12 +442,12 @@ void printPacket(packet_t &packet, conn_t *connection, bool recv)
   cout << endl;
 }
 
-void recvPacket(packet_t &packet) {
+void ntohPacket(packet_t &packet) {
   packet.sequence = ntohl(packet.sequence);
   packet.acknowledgment = ntohl(packet.acknowledgment);
   packet.connectionID = ntohs(packet.connectionID);
 }
-void sendPacket(packet_t &packet) {
+void htonPacket(packet_t &packet) {
   packet.sequence = htonl(packet.sequence);
   packet.acknowledgment = htonl(packet.acknowledgment);
   packet.connectionID = htons(packet.connectionID);
