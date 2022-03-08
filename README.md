@@ -42,6 +42,14 @@ Grace Ma (204881323)
 - Overall debug on server side
 
 Jonathan Lam (605415001)
+- worked on both client and server
+- Implemented 3 way handshake on both client and server
+- Implemented FIN sequence for both client and server
+- Organized connection struct for each connection to hold metadata individually
+- wrote helper functions for dealing with packet structures and connection structures
+- wrote printing out packet functions for server side
+- Implemented timers for connection timeout, connection close, retransmission
+- Implemented control flow for dealing with parallel connections
 
 Desmond Andersen (605391825)
 
