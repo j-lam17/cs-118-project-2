@@ -1,5 +1,5 @@
-*.o
-*.dSYM
-.vagrant
-server
-client
+/2mb.txt
+/client copy.cpp
+/server_jonny.cpp
+/server_ooo.cpp
+test10Mb.txt
