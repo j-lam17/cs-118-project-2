@@ -1,3 +1,4 @@
+
 #include <string>
 #include <thread>
 #include <iostream>
@@ -375,6 +376,14 @@ void finHandshake(packet_t &incomingPacket)
         {
             // need to resend previous ack so client knows that the server hasn't
             // received all of the necessary bytes yet
+            packet_t p;
+            connToHeader(connection, p);
+            setA(p, true);
+            setS(p, false);
+            setF(p, false);
+            printPacketServer(p, connection, false);
+            sendPacket(p);
+            sendto(server_fd, &incomingPacket, 12, 0, &connection->addr, addr_len);
             return;
         }
 
@@ -408,16 +417,16 @@ void finHandshake(packet_t &incomingPacket)
         // need to delete previous timer for 10s data
         timer_delete(*connection->ptrTimerid);
         // updating handler function
-        connection->ptrSev->sigev_notify_function = finalAckHandler;
+        // connection->ptrSev->sigev_notify_function = finalAckHandler;
         // create a new timer object
-        timer_create(CLOCKID, connection->ptrSev, connection->ptrTimerid);
+        // timer_create(CLOCKID, connection->ptrSev, connection->ptrTimerid);
         // arm the timer
-        connection->ptrIts->it_value.tv_sec = 2;
-        connection->ptrIts->it_value.tv_nsec = 0;
-        connection->ptrIts->it_interval.tv_sec = 2;
-        connection->ptrIts->it_interval.tv_nsec = 0;
+        // connection->ptrIts->it_value.tv_sec = 2;
+        // connection->ptrIts->it_value.tv_nsec = 0;
+        // connection->ptrIts->it_interval.tv_sec = 2;
+        // connection->ptrIts->it_interval.tv_nsec = 0;
 
-        timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
+        // timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
     }
 }
 
@@ -630,7 +639,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
         connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
 
         // cerr << "BEFORE WHILE" << endl; 
-        while (connection->payloads->find(connection->currentAck) != connection->payloads->end())
+        while ((connection->payloads->find(connection->currentAck) != connection->payloads->end()) && not_break)
         { // while there's an OOO packet that is now ready
         //   cerr <<"IN WHILE LOOP" << endl;
           int packet_sequence = connection->currentAck;
@@ -646,9 +655,11 @@ void appendPayload(packet_t &packet, conn_t *connection)
           // *connection->fs << payload_to_fill;
 
           // remove entry from bytes_to_read:
-        //   connection->bytes_recieved->erase(packet_sequence);
+          //   connection->bytes_recieved->erase(packet_sequence);
 
           // remote entry from payloads:
+          // delete dynamic packet 
+          delete (*connection->payloads)[packet_sequence];
           connection->payloads->erase(packet_sequence);
 
         }
@@ -672,30 +683,38 @@ void appendPayload(packet_t &packet, conn_t *connection)
     // out of order branch requires buffering
     else
     {
-      payload_t *newPayload = new payload_t;
+      // check that the payload doesn't exist in the hash map
+      if (connection->payloads->find(packet.sequence) != connection->payloads->end()) {
+        payload_t *newPayload = new payload_t;
 
-      newPayload->sequence = packet.sequence;
-      newPayload->length = len;
+        newPayload->sequence = packet.sequence;
+        newPayload->length = len;
 
-      memcpy(newPayload->payload, packet.payload, len);
+        memcpy(newPayload->payload, packet.payload, len);
 
       // add OOO bytes interval to dictionary
-    //   connection->bytes_recieved->at(newPayload->sequence) = newPayload->length;
+      // connection->bytes_recieved->at(newPayload->sequence) = newPayload->length;
 
       // add payload to payload dictionary
       (*connection->payloads)[newPayload->sequence] = newPayload;
+      }
 
       // send back duplicate ACK
       packet = {0};
       connToHeader(connection, packet);
       setA(packet, true);
+      setS(packet, false);
+      setF(packet, false);
       // packet.flags = htons(ACK);
+
+      // need to print out packet sent
+      printPacketServer(packet, connection, false);
+
+      sendPacket(packet);
 
       // send the packet to the respective client
       sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
 
-      // need to print out packet sent
-      printPacketServer(packet, connection, false);
     }
 }
 
@@ -740,6 +759,9 @@ finalAckHandler(union sigval val)
     setF(packet, true);
     // print out the packet
     printPacketServer(packet, connection, false);
+    // sending packet
+    sendPacket(packet);
+    sendto(server_fd, &packet, 12, 0, &connection->addr, addr_len);
 }
 
 static void sigHandler(int signum)
