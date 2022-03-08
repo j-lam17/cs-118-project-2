@@ -181,7 +181,7 @@ int main(int argc, char *argv[])
     int ret;
     if ((ret = getaddrinfo(NULL, argv[1], &hints, &myAddrInfo)) != 0)
     {
-        cerr << "error" << endl;
+        cerr << "ERROR: getaddrinfo()" << endl;
         exit(1);
     }
 
@@ -199,7 +199,7 @@ int main(int argc, char *argv[])
         // recvNum = size of datagram read in
         // cerr << "Waiting\n";
         recvNum = recvfrom(server_fd, &incomingPacket, PACKET_SIZE, 0, &client, &addr_len);
-        cerr << "Received " << recvNum << " bytes\n";
+        // cerr << "Received " << recvNum << " bytes\n";
 
         // process packet
         recvPacket(incomingPacket);

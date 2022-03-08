@@ -18,7 +18,6 @@
 #include <fstream>
 #include <iostream>
 #include <bitset>
-#include <queue> 
 
 using namespace std;
 
@@ -54,9 +53,6 @@ typedef struct conn_t {
   unsigned int ssthresh = INIT_SSTHRESH;
 } conn_t;
 
-queue<packet_t> q;
-queue<ssize_t> sizes;
-
 void connToHeader(conn_t *connection, packet_t &packet);
 void setA(packet_t &packet, bool b);
 void setS(packet_t &packet, bool b);
@@ -79,28 +75,25 @@ abortHandler(union sigval val) {
   close(serverSockFd);
   cerr << "ERROR: aborting connection due to no packets within 10s" << endl;
   exit(1);
+  // sendto(serverSockFd, val.sival_ptr, bytesRead, MSG_CONFIRM, serverSockAddr, serverSockAddrLength);
 }
 
 static void
 finHandler(union sigval val) {
   close(fileToTransferFd);
   close(serverSockFd);
-  cerr << "DEBUG: Closing file transmission connection\n";
+  // cerr << "DEBUG: Closing file transmission connection\n";
   exit(0);
 }
 
 static void
 RTO(union sigval val) {
-  // Update CWND + SSTHRESH
+  // ssthresh -> cwnd / 2
+  // cwnd = 512
   client_conn.ssthresh = client_conn.cwnd / 2;
-  client_conn.cwnd = MIN_CWND;
+  client_conn.cwnd = 512;
 
   // retransmit most recent packet
-  packet_t p = q.front();
-  ssize_t size = sizes.front();
-  cerr << "retransmitting " << ntohl(p.sequence) << " (" << strlen(p.payload) << "B)" << endl;
-  sendto(serverSockFd, &p, 12 + size, 0, serverSockAddr, serverSockAddrLength);
-  printPacket(p, &client_conn, false);
 }
 
 // MAIN ==========
@@ -171,8 +164,8 @@ int main(int argc, char *argv[]) {
   sev.sigev_notify_attributes = NULL;
   timer_create(CLOCK_MONOTONIC, &sev, &timerid);
 
-  // Start the 10 second abort timer for connection activity
-  its.it_value.tv_sec = 5;
+  // Start the 10 second timer for connection activity
+  its.it_value.tv_sec = 10;
   its.it_value.tv_nsec = 0;
   its.it_interval.tv_sec = 0;
   its.it_interval.tv_nsec = 0;
@@ -184,13 +177,12 @@ int main(int argc, char *argv[]) {
   ntohPacket(packet);
   printPacket(packet, &client_conn, true);
 
-  // Disarm abort timer
-  timer_settime(timerid, 0, &its, NULL);
-
   // extract client number
   client_conn.ID = packet.connectionID;
   client_conn.currentAck = packet.sequence + 1;
 
+  // change to reset timer here
+  timer_settime(timerid, 0, &its, NULL);
   // sending file in packets of size 512 always
   // size of the file
   long int size = fdStat.st_size;
@@ -199,6 +191,22 @@ int main(int argc, char *argv[]) {
   char sendBuf[512];
   int bytesRead;
   bool first = true;
+
+  // Timer variables for RTO
+  timer_t timeridRTO;
+  struct sigevent sevRTO;
+  struct itimerspec itsRTO;
+
+  sevRTO.sigev_notify = SIGEV_THREAD;
+  sevRTO.sigev_notify_function = RTO;
+  sevRTO.sigev_notify_attributes = NULL;
+  timer_create(CLOCK_MONOTONIC, &sevRTO, &timeridRTO);
+
+  // Start the 10 second timer
+  itsRTO.it_value.tv_sec = 2;
+  itsRTO.it_value.tv_nsec = 0;
+  itsRTO.it_interval.tv_sec = 2;
+  itsRTO.it_interval.tv_nsec = 0;
 
   // Loop through file data
   long int bytesLeftToRead = size;
@@ -213,12 +221,6 @@ int main(int argc, char *argv[]) {
     if (nPackets > nPacketsLeft)
       nPackets = nPacketsLeft;
 
-    unsigned int expectedAck = client_conn.currentSeq + 512;
-    long int bytesSent = 0;
-
-    cerr << "----------" << endl;
-
-    // Send out packets
     for (int i = 0; i < nPackets; i++) {
       // Clear datagram
       packet = {0};
@@ -241,39 +243,17 @@ int main(int argc, char *argv[]) {
       bytesLeftToRead -= 512;
 
       // Send packet
-      cerr << "Sent packet" << endl;
       printPacket(packet, &client_conn, false);
       htonPacket(packet);
       sendto(serverSockFd, &packet, 12 + bytesRead, 0, serverSockAddr, serverSockAddrLength);
-      q.push(packet);
-      sizes.push(12 + bytesRead);
-      bytesSent += bytesRead;
 
       // Update sequence #
       client_conn.currentSeq = (client_conn.currentSeq + bytesRead) % (MAX_ACK + 1);
     }
 
-    // Timer variables for RTO
-    timer_t timeridRTO;
-    struct sigevent sevRTO;
-    struct itimerspec itsRTO;
-
-    sevRTO.sigev_notify = SIGEV_THREAD;
-    sevRTO.sigev_notify_function = RTO;
-    sevRTO.sigev_notify_attributes = NULL;
-    timer_create(CLOCK_MONOTONIC, &sevRTO, &timeridRTO);
-
-    // // Start the 0.5 second timer
-    itsRTO.it_value.tv_sec = 0;
-    itsRTO.it_value.tv_nsec = 500000000;
-    itsRTO.it_interval.tv_sec = 0;
-    itsRTO.it_interval.tv_nsec = 0;
-    timer_settime(timeridRTO, 0, &itsRTO, NULL);
-
-    long int bytesToAck = bytesSent;
-
-    while (!q.empty()) {
-      // Clear packet data
+    for (int i = 0; i < nPackets; i++) {
+      // Set RTO + clear packet data
+      timer_settime(timeridRTO, 0, &itsRTO, NULL);
       packet = {0};
 
       // Wait for a response from server
@@ -284,53 +264,26 @@ int main(int argc, char *argv[]) {
       if (packet.connectionID == client_conn.ID) {
         printPacket(packet, &client_conn, true);
 
-        cerr << "Recieved ACK: "<< packet.acknowledgment << " (expected " << expectedAck << ")" << endl;
-        if (packet.acknowledgment >= expectedAck) {
-          // Reset RTO timer (ASSUMING CORRECT IN ORDER ACK)
-          timer_settime(timeridRTO, 0, &itsRTO, NULL);
+        // Reset RTO timer (ASSUMING CORRECT IN ORDER ACK)
+        timer_settime(timeridRTO, 0, &itsRTO, NULL);
 
-          // // Reset 10s timer for receiving data
-          timer_settime(timerid, 0, &its, NULL);
+        // Reset 10s timer for receiving data
+        timer_settime(timerid, 0, &its, NULL);
 
-          // Update CWND
-          if (client_conn.cwnd < client_conn.ssthresh) // Slow-start mode
-            client_conn.cwnd += 512;
-          else if (client_conn.cwnd  < MAX_CWND) // Congestion avoidance
-            client_conn.cwnd += ((512 * 512) / client_conn.cwnd);
-          else
-            client_conn.cwnd = MAX_CWND; // Max-out
-
-          bytesToAck -=512;
-
-          if (packet.acknowledgment > expectedAck) {
-            expectedAck = packet.acknowledgment;
-            while (!q.empty()) {
-              q.pop();
-              sizes.pop();
-            }
-          }
-          else {
-            expectedAck += (bytesToAck < 512) ? bytesToAck : 512;
-            q.pop();
-            sizes.pop();
-          }
-
-        }
+        // Update CWND
+        if (client_conn.cwnd < client_conn.ssthresh) // Slow-start mode
+          client_conn.cwnd += 512;
+        else if (client_conn.cwnd  < MAX_CWND) // Congestion avoidance
+          client_conn.cwnd += ((512 * 512) / client_conn.cwnd);
+        else
+          client_conn.cwnd = MAX_CWND; // Max-out
       }
       // Drop packets from unknown senders
       else {
         dropPacket(packet);
       }
     }
-
-    // Disarm RTO
-    itsRTO.it_value.tv_sec = 0;
-    itsRTO.it_value.tv_nsec = 0;
-    itsRTO.it_interval.tv_sec = 0;
-    itsRTO.it_interval.tv_nsec = 0;
-    timer_settime(timeridRTO, 0, &itsRTO, NULL);
   }
-
 
   // sending FIN packet
   packet = {0};
@@ -352,7 +305,7 @@ int main(int argc, char *argv[]) {
   sev.sigev_notify_attributes = NULL;
   timer_create(CLOCK_MONOTONIC, &sev, &timerid);
 
-  // Start the 2 second timer
+  // Start the 10 second timer
   its.it_value.tv_sec = 2;
   its.it_value.tv_nsec = 0;
   its.it_interval.tv_sec = 0;
@@ -392,12 +345,33 @@ int main(int argc, char *argv[]) {
       dropPacket(packet);
     }
   }
+  /*
+  client_conn.currentSeq = (client_conn.currentSeq + 1) % (MAX_ACK + 1);
 
-  // Close socket + file
+  // receiving FIN-ACK packet from server
+  packet = {0};
+  recvfrom(serverSockFd, &packet, 12, 0, serverSockAddr, &serverSockAddrLength);
+
+  ntohPacket(packet);
+
+  printPacket(packet, &client_conn, true);
+
+  // sending final ACK to indicate it has received FIN-ACK and to close connection completely
+  packet = {0};
+  connToHeader(&client_conn, packet);
+  setA(packet, true);
+  setS(packet, false);
+  setF(packet, false);
+
+  printPacket(packet, &client_conn, false);
+
+  htonPacket(packet);
+
+  sendto(serverSockFd, &packet, sizeof(packet_t), 0, serverSockAddr, serverSockAddrLength);
   close(serverSockFd);
   close(fileToTransferFd);
-
   exit(0);
+  */
 }
 
 void setA(packet_t &packet, bool b) {
