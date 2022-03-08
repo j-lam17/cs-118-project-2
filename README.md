@@ -34,12 +34,19 @@ To dissect tcpdump-recorded file, you can use `-r <pcapfile>` option. For exampl
 ## PROJECT REPORT
 
 Grace Ma (204881323)
+- Focused on server
+- Implemented out of order received packets on server end
+- Implemented receive window and sequence number wrapping on server end
+- Wrote payload to binary file 
+- Implemented sighandler
+- Overall debug on server side
+
+Jonathan Lam (605415001)
 
 Desmond Andersen (605391825)
 
 - Focused on client. Implemented host-to-network byte order conversion (and vice versa) and congestion window adjustment. Also worked on (to a lesser degree of success) the client small file transfer, connection abortion, and responding with ACK for incoming FINs for 2 seconds.
 
-Jonathan Lam (605415001)
 
 _Design_
 
