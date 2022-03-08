@@ -60,7 +60,8 @@ typedef struct conn_t
     unsigned int cwnd = MIN_CWND;
     unsigned int ssthresh = INIT_SSTHRESH;
     // ofstream to write to
-    ofstream *fs;
+    // ofstream *fs;
+    FILE *fs;
     // waiting for final ACK from client to completely close
     bool waitingForAck = false;
     // indicate that you have received data and to deactivate corresponding timer
@@ -71,7 +72,7 @@ typedef struct conn_t
 
     unsigned int last_byte_read = 12345;
 
-    unordered_map<unsigned int, unsigned int>* bytes_recieved; // key = seq#, val = packet length
+    // unordered_map<unsigned int, unsigned int>* bytes_recieved; // key = seq#, val = packet length
 
     unordered_map<unsigned int, payload_t*> * payloads;
 
@@ -113,6 +114,7 @@ unsigned int currentConn = 1;
 int server_fd;
 unsigned int recvNum;
 socklen_t addr_len = sizeof(struct sockaddr);
+bool not_break = 1;
 
 // client initiates with SYN, so need to wait to receive a SYN packet
 // before sending back SYN/ACK (no payload)
@@ -136,6 +138,7 @@ int main(int argc, char *argv[])
     // intializing signal handlers
     signal(SIGQUIT, sigHandler);
     signal(SIGTERM, sigHandler);
+    signal(SIGINT, sigHandler);
 
     int port = atoi(argv[1]);
     file_directory = argv[2];
@@ -187,7 +190,7 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
-    while (true)
+    while (not_break)
     {
         // reset contents of incoming packet to be emtpy
         incomingPacket = {0};
@@ -275,7 +278,7 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client)
         newC->addr = client;
         currentConn++;
 
-        newC->bytes_recieved = new unordered_map<unsigned int, unsigned int>;
+        // newC->bytes_recieved = new unordered_map<unsigned int, unsigned int>;
         newC->payloads = new unordered_map<unsigned int, payload_t*>; 
     }
     // syn packet for an already existing connection
@@ -318,8 +321,11 @@ void ThreeWayHandshake(packet_t &incomingPacket, struct sockaddr &client)
     string fileNum = to_string(newC->ID);
     string path = file_directory + "/" + fileNum + ".file";
 
-    ofstream *myF = new ofstream(path);
-    newC->fs = myF;
+
+    newC->fs = fopen(path.c_str(), "wb");
+
+    // ofstream *myF = new ofstream(path);
+    // newC->fs = myF;
 
     // can now reuse buffer since all information has been extracted
     // clearing previous information for packet
@@ -552,35 +558,16 @@ void appendPayload(packet_t &packet, conn_t *connection)
 
     // assuming in order arrival, no buffering required yet
     int len = payloadSize(packet);
-    cerr << "Received payload: " << len << " bytes" << endl;
 
-    //grace start: ______ 
+    //_______ wrapping check begins _______
     unsigned int last_byte = packet.sequence + len;
 
     if (last_byte  < connection-> currentAck){//wrap around happened
       last_byte += MAX_ACK;
-
     }
 
-    if ((last_byte - connection->currentAck) > RWND) {
-      // cerr << "last_byte: " << last_byte <<endl;
-      // cerr << "ack: " << ack << endl; 
-      // cerr << "OVERFLOW DROP" << endl;
+    if ((last_byte - connection->currentAck) > RWND) {\
       dropPacketServer(packet);
-
-      // // create packet to send back acknowledgement
-      // //since dropped packet, nothing happens
-      // packet = {0};
-      // connToHeader(connection, packet);
-
-      // packet.flags = htons(ACK);
-
-      // // need to print out packet sent
-      // printPacketServer(packet, connection, false);
-
-      // // send the packet to the respective client
-      // sendto(server_fd, &packet, PACKET_SIZE, 0, &connection->addr, addr_len);
-
       return;
     }
     else if (last_byte > connection->last_byte_read){//not overflow
@@ -592,9 +579,7 @@ void appendPayload(packet_t &packet, conn_t *connection)
     if (connection->last_byte_read > MAX_ACK){
       connection->last_byte_read = connection->last_byte_read % MAX_ACK +1;
     }
-
-
-    //grace_end ^^ : _______
+    //________wrapping check ends _______
 
 
 
@@ -608,20 +593,21 @@ void appendPayload(packet_t &packet, conn_t *connection)
         if (ackPacket(packet) && connection->waitingForAck)
         {
             // need to close file pointer
-            connection->fs->close();
+            fclose(connection->fs);
+            // connection->fs->close();
             // cerr << "Closed connection " << connection->ID << endl;
             // remove from the connections hash table
             connections.erase(connection->ID);
 
             // free allocated resources
             // free ofstream
-            delete connection->fs;
+            // delete connection->fs;
             // free timer
             timer_delete(*connection->ptrTimerid);
             delete connection->ptrTimerid;
             delete connection->ptrSev;
             delete connection->ptrIts;
-            delete connection->bytes_recieved;
+            // delete connection->bytes_recieved;
             delete connection->payloads;
             // free connection
             delete connection;
@@ -631,30 +617,36 @@ void appendPayload(packet_t &packet, conn_t *connection)
         // reset the timer delay to 10s
         timer_settime(*connection->ptrTimerid, 0, connection->ptrIts, NULL);
 
+        // int fn = fileno(connection->fs);
         // append payload to existing file
-        *connection->fs << packet.payload;
+        // *connection->fs << packet.payload;
+        fwrite(packet.payload, 1, len, connection->fs);
+
+
+
         // update current Ack Num for the connection
         // seqNum only increments on SYN and FIN, not for ACK
         // connection->currentSeq = same
         connection->currentAck = (connection->currentAck + len) % (MAX_ACK + 1); // change next expected byte
 
-        cerr << "BEFORE WHILE" << endl; 
+        // cerr << "BEFORE WHILE" << endl; 
         while (connection->payloads->find(connection->currentAck) != connection->payloads->end())
         { // while there's an OOO packet that is now ready
-          cerr <<"IN WHILE LOOP" << endl;
+        //   cerr <<"IN WHILE LOOP" << endl;
           int packet_sequence = connection->currentAck;
-          int packet_length = connection->bytes_recieved->at(packet_sequence);
+          int packet_length = connection->payloads->at(packet_sequence)->length;
 
           connection->currentAck = (connection->currentAck + packet_length) % (MAX_ACK + 1);
 
-          char payload_to_fill[512];
+          char payload_to_fill[len];
 
           memcpy(payload_to_fill, connection->payloads->at(packet_sequence)->payload, len);
 
-          *connection->fs << payload_to_fill;
+          fwrite(payload_to_fill, 1, packet_length, connection->fs);
+          // *connection->fs << payload_to_fill;
 
           // remove entry from bytes_to_read:
-          connection->bytes_recieved->erase(packet_sequence);
+        //   connection->bytes_recieved->erase(packet_sequence);
 
           // remote entry from payloads:
           connection->payloads->erase(packet_sequence);
@@ -688,10 +680,10 @@ void appendPayload(packet_t &packet, conn_t *connection)
       memcpy(newPayload->payload, packet.payload, len);
 
       // add OOO bytes interval to dictionary
-      connection->bytes_recieved->at(newPayload->sequence) = newPayload->length;
+    //   connection->bytes_recieved->at(newPayload->sequence) = newPayload->length;
 
       // add payload to payload dictionary
-      connection->payloads->at(newPayload->sequence) = newPayload;
+      (*connection->payloads)[newPayload->sequence] = newPayload;
 
       // send back duplicate ACK
       packet = {0};
@@ -714,20 +706,21 @@ activeDataHandler(union sigval val)
     // find the existing connection
     conn_t *connection = connections[val.sival_int];
     // write single ERROR string to the file stream
-    *connection->fs << "ERROR";
+    // *connection->fs << "ERROR";
     // close the file stream
-    connection->fs->close();
+    fclose(connection->fs);
+    // connection->fs->close();
     // remove the connection from the unordered_map
     connections.erase(connection->ID);
     // free ofstream
-    delete connection->fs;
+    // delete connection->fs;
     // destroy timer
     timer_delete(*connection->ptrTimerid);
     // free objects
     delete connection->ptrTimerid;
     delete connection->ptrSev;
     delete connection->ptrIts;
-    delete connection->bytes_recieved;
+    // delete connection->bytes_recieved;
     delete connection->payloads;
     // free memory
     delete connection;
@@ -752,6 +745,7 @@ finalAckHandler(union sigval val)
 static void sigHandler(int signum)
 {
     // cerr << "Caught signal\n";
+    not_break = 0;
     exit(0);
 }
 
